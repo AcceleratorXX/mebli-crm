@@ -5,7 +5,7 @@ const fsp = fs.promises;
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
-const { DEFAULT_TEMPLATE } = require('./defaults');
+const { DEFAULT_TEMPLATE, FIRST_VERSION_IDS } = require('./defaults');
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT) || 3000;
@@ -28,7 +28,8 @@ let db;
 
 function loadDb() {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-  if (fs.existsSync(DB_FILE)) {
+  const fresh = !fs.existsSync(DB_FILE);
+  if (!fresh) {
     fs.copyFileSync(DB_FILE, path.join(DATA_DIR, 'db.backup.json'));
     db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
   } else {
@@ -37,6 +38,26 @@ function loadDb() {
   db.projects ??= [];
   db.template ??= DEFAULT_TEMPLATE;
   db.seq ??= db.projects.length;
+  db.contacts ??= [];
+  db.settings ??= {};
+  db.defaultsSeen ??= fresh ? DEFAULT_TEMPLATE.map(q => q.id) : FIRST_VERSION_IDS;
+
+  // Дописати в шаблон нові стандартні питання (ті, що користувач видалив сам, не повертаються)
+  let added = 0;
+  for (const [i, q] of DEFAULT_TEMPLATE.entries()) {
+    if (db.defaultsSeen.includes(q.id)) continue;
+    db.defaultsSeen.push(q.id);
+    if (db.template.some(t => t.id === q.id)) continue;
+    let pos = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const k = db.template.findIndex(t => t.id === DEFAULT_TEMPLATE[j].id);
+      if (k >= 0) { pos = k + 1; break; }
+    }
+    db.template.splice(pos, 0, { ...q });
+    added++;
+  }
+  if (added) console.log(`До шаблону додано нових питань: ${added}`);
+  if (fresh || added) saveDb();
 }
 
 let writing = Promise.resolve();
@@ -79,7 +100,8 @@ const str = (v, max = 2000) => (v == null ? '' : String(v).slice(0, max));
 // ---------- API
 
 const EDITABLE = ['name', 'client', 'phone', 'address', 'furnitureType', 'status', 'deadline',
-  'budget', 'notes', 'closedAt', 'questions', 'invoices', 'log', 'reminders'];
+  'budget', 'notes', 'closedAt', 'questions', 'invoices', 'log', 'reminders',
+  'stages', 'materials', 'estimate', 'approvals', 'handover'];
 
 function findProject(id) {
   return db.projects.find(p => p.id === id);
@@ -90,7 +112,23 @@ async function api(req, res, parts, url) {
   const m = req.method;
 
   if (resource === 'data' && m === 'GET') {
-    return send(res, 200, { projects: db.projects, template: db.template, dataDir: DATA_DIR });
+    return send(res, 200, { projects: db.projects, template: db.template, contacts: db.contacts, settings: db.settings, dataDir: DATA_DIR });
+  }
+
+  if (resource === 'contacts' && !id && m === 'PUT') {
+    const body = await readJson(req);
+    if (!Array.isArray(body)) return send(res, 400, { error: 'Очікується масив контактів' });
+    db.contacts = body.filter(c => c && str(c.name).trim());
+    await saveDb();
+    return send(res, 200, db.contacts);
+  }
+
+  if (resource === 'settings' && !id && m === 'PUT') {
+    const body = await readJson(req);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { error: 'Очікується об\'єкт' });
+    db.settings = body;
+    await saveDb();
+    return send(res, 200, db.settings);
   }
 
   if (resource === 'template') {
@@ -189,10 +227,10 @@ async function api(req, res, parts, url) {
     }
     if (m === 'DELETE') {
       p.files = p.files.filter(x => x !== f);
-      for (const inv of p.invoices) if (inv.fileId === f.id) inv.fileId = null;
+      for (const x of [...(p.invoices || []), ...(p.approvals || [])]) if (x.fileId === f.id) x.fileId = null;
       await saveDb();
       await fsp.rm(filePath, { force: true });
-      return send(res, 200, { files: p.files, invoices: p.invoices });
+      return send(res, 200, { files: p.files, invoices: p.invoices, approvals: p.approvals });
     }
   }
 

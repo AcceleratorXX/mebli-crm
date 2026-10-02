@@ -12,14 +12,21 @@
     <a class="brand" href="#/"><span class="logo"></span>Меблі CRM</a>
     <nav class="nav">
       <a href="#/" data-nav="">Проєкти</a>
+      <a href="#/board" data-nav="board">Дошка</a>
+      <a href="#/calendar" data-nav="calendar">Календар</a>
+      <a href="#/contacts" data-nav="contacts">Контакти</a>
       <a href="#/archive" data-nav="archive">Архів</a>
-      <a href="#/settings" data-nav="settings">Шаблон питань</a>
+      <a href="#/settings" data-nav="settings">Налаштування</a>
     </nav>
   </header>
   <main id="app"></main>
   <dialog id="dlg"></dialog>
   <div id="toast"></div>
+  <div id="print"></div>
   <datalist id="furniture-types"></datalist>
+  <datalist id="clients-list"></datalist>
+  <datalist id="suppliers-list"></datalist>
+  <datalist id="units-list"><option value="шт"><option value="м²"><option value="м.п."><option value="лист"><option value="компл."><option value="уп."></datalist>
   <script src="app.js"></script>
 </body>
 </html>
