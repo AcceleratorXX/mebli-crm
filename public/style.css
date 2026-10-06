@@ -370,7 +370,7 @@ dialog::backdrop { background: rgba(20, 15, 10, .45); }
 /* етапи */
 .list-card { padding: 4px 0; }
 .st-row {
-  display: grid; grid-template-columns: auto 22px minmax(0, 1fr) auto 90px auto; gap: 10px; align-items: center;
+  display: grid; grid-template-columns: auto 22px minmax(0, 1fr) auto 150px auto; gap: 10px; align-items: center;
   padding: 8px 16px; border-bottom: 1px solid var(--border);
 }
 .st-row:last-child { border-bottom: 0; }
@@ -382,6 +382,8 @@ dialog::backdrop { background: rgba(20, 15, 10, .45); }
 .st-date { display: flex; align-items: center; gap: 6px; }
 .st-date input { padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .st-doneat { color: var(--ok); }
+.st-doneat label { display: flex; align-items: center; gap: 4px; }
+.st-doneat input { padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--ok); }
 
 /* матеріали */
 .mat-table input, .mat-table select {
@@ -409,7 +411,14 @@ dialog::backdrop { background: rgba(20, 15, 10, .45); }
 label.btn input[hidden] { display: none; }
 
 /* дошка */
-.board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(230px, 1fr); gap: 12px; overflow-x: auto; padding-bottom: 12px; align-items: start; }
+/* Усі колонки — на ширину екрана, без прокрутки вбік; картки компактні, довгі назви переносяться. */
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; padding-bottom: 12px; align-items: start; }
+.board .col-head { padding: 8px; font-size: 13px; gap: 6px; line-height: 1.2; }
+.board .col-head i { flex: none; }
+.board .col-body { padding: 6px; gap: 6px; }
+.board .kcard { padding: 8px; font-size: 13px; overflow-wrap: anywhere; }
+.board .kcard-foot { flex-wrap: wrap; gap: 2px 8px; }
+@media (max-width: 900px) { .board { grid-auto-columns: minmax(170px, 1fr); overflow-x: auto; } }
 .col {
   --c: #64748b; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
   min-height: 200px; display: flex; flex-direction: column; outline: 2px dashed transparent; outline-offset: -2px;
@@ -473,7 +482,7 @@ label.btn input[hidden] { display: none; }
 /* ================= друк ================= */
 
 #print { display: none; }
-@page { margin: 15mm; }
+@page { size: A4; margin: 15mm; }
 @media print {
   body { background: #fff !important; color: #000 !important; }
   body > *:not(#print) { display: none !important; }
@@ -498,3 +507,111 @@ label.btn input[hidden] { display: none; }
 .doc-total td { font-weight: 700; }
 .doc-sign { margin-top: 36px; }
 .doc-sign.two { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; }
+
+/* ================= КП ================= */
+
+.kp-edit { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.kp-thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.kp-thumb { position: relative; width: 96px; height: 96px; padding: 0; border: 2px solid var(--border); border-radius: 8px; background: var(--surface-2); overflow: hidden; cursor: pointer; display: grid; place-items: center; }
+.kp-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.kp-thumb.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.kp-n { position: absolute; top: 4px; left: 4px; min-width: 20px; height: 20px; border-radius: 10px; background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 700; display: grid; place-items: center; }
+.kp-upload { font-size: 28px; color: var(--muted); border-style: dashed; }
+.kp-upload:hover { color: var(--accent); border-color: var(--accent); }
+.kp-hint { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.kp-nums { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 12px; }
+.kp-nums .link-btn { font-size: 12px; margin-left: 4px; }
+.kp-sum { margin-top: 10px; text-align: right; }
+.logo-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 38px; }
+.logo-prev { max-height: 48px; max-width: 120px; background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
+@media (max-width: 760px) {
+  .kp-edit { grid-template-columns: 1fr; }
+  .kp-nums { grid-template-columns: 1fr 1fr; }
+}
+
+/* друк КП: А4, поля 15 мм → 267 мм по висоті */
+.kp { font: 11pt/1.35 Arial, Helvetica, sans-serif; color: #000; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+/* Своя сторінка без полів браузера: туди він друкує адресу, дату й номер сторінки — на КП їх не треба. Поля — всередині. */
+@page kp { size: A4; margin: 0; }
+/* Висота з запасом: принтер (і «Microsoft Print to PDF») має свої неробочі поля по краях — точно в 297 мм воно не влазить і дає порожню сторінку. */
+.kp-page { page: kp; break-after: page; break-inside: avoid; box-sizing: border-box; height: 280mm; padding: 12mm 15mm 0; overflow: hidden; }
+.kp-page:last-child { break-after: auto; }
+.kp-cover-top { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 4mm; }
+.kp-logo-grid { width: 52mm; height: 52mm; border: 2px solid #000; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; font: 44pt/1 "Times New Roman", Georgia, serif; }
+.kp-logo-grid span { display: grid; place-items: center; }
+.kp-logo-grid span:nth-child(odd) { border-right: 1px solid #000; }
+.kp-logo-grid span:nth-child(-n+2) { border-bottom: 1px solid #888; }
+.kp-logo-img { display: block; max-width: 80mm; max-height: 55mm; }
+.kp-logo-text { font-size: 28pt; font-weight: 700; }
+.kp-contacts { margin-top: 16mm; }
+.kp-sheet { height: 100%; border: 1px solid #000; display: flex; flex-direction: column; }
+.kp-sheet.auto { height: auto; }
+.kp-title { font-size: 22pt; font-weight: 700; text-align: center; padding: 3mm; border-bottom: 1px solid #000; }
+.kp-images { flex: 1 1 0; min-height: 0; display: grid; grid-auto-rows: minmax(0, 1fr); gap: 5mm; padding: 5mm; }
+.kp-images img { width: 100%; height: 100%; min-height: 0; object-fit: contain; display: block; }
+.kp-row { border-top: 1px solid #000; padding: 1.6mm 2mm; }
+.kp-red { color: #e00000; }
+.kp-prices { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid #000; }
+.kp-title + .kp-prices { border-top: 0; }
+.kp-prices > div { padding: 1.6mm 2mm; border-top: 1px solid #000; }
+.kp-prices > div:nth-child(-n+2) { border-top: 0; }
+.kp-prices > div:nth-child(odd) { border-right: 1px solid #000; }
+.kp-prices .r { text-align: right; }
+.kp-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.kp-li { display: grid; grid-template-columns: 22px 1fr auto auto auto; align-items: center; gap: 4px; }
+.kp-li input { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.kp-li .icon-btn:disabled { opacity: .3; cursor: default; }
+.inv-check td { background: var(--warn-soft); }
+.inv-items summary { cursor: pointer; margin-top: 2px; }
+.inv-items table { margin-top: 4px; }
+.inv-items td { padding: 3px 6px; font-size: 12px; }
+
+/* ================= договір ================= */
+.warn-card { background: var(--warn-soft); border-color: var(--warn); }
+.warn-card a { color: inherit; text-decoration: underline; }
+/* Без полів зверху й знизу браузер не друкує адресу, дату й номер сторінки; відступи — рядками thead/tfoot, що повторюються на кожній сторінці. */
+@page dg { size: A4; margin: 0 18mm; }
+.dg-page { page: dg; width: 100%; border-collapse: collapse; }
+.dg-page > thead td, .dg-page > tfoot td { height: 15mm; padding: 0; }
+.dg-page > tbody > tr > td { padding: 0; }
+.dg-page h2 { font-size: 11pt; border: 0; margin: 12px 0 4px; }
+.dg-page p { margin: 0 0 5px; text-align: justify; }
+.dg-place { display: flex; justify-content: space-between; margin: 10px 0 12px; }
+.dg-break { break-before: page; }
+.dg-annex { text-align: right; font-size: 10pt; margin-bottom: 10px; }
+.dg-page .doc-parties { break-inside: avoid; font-size: 10pt; }
+.dg-party { display: flex; flex-direction: column; justify-content: space-between; gap: 28px; }
+.dg-sign { white-space: nowrap; }
+.dg-page .nowrap { white-space: nowrap; }
+
+/* договір за зразком: Times 10 пт, номери пунктів окремою колонкою, підписи внизу кожної сторінки */
+.dg-page > thead td { height: 14mm; }
+.dg-page > tfoot td { height: 22mm; vertical-align: bottom; padding-bottom: 8mm; }
+.dg-foot { display: flex; justify-content: space-between; padding: 0 8mm; font: 10pt "Times New Roman", serif; }
+.dg-foot i { display: inline-block; width: 40mm; border-bottom: 1px solid #000; margin-left: 4px; }
+.dg-doc { font: 10pt/1.3 "Times New Roman", Georgia, serif; }
+.dg-doc .dg-title { font-size: 11pt; text-align: center; margin: 0 0 16px; }
+.dg-doc .dg-place { margin: 0 0 14px; }
+.dg-intro, .dg-def, .dg-plain { text-align: justify; margin: 0 0 3px; }
+.dg-intro { margin-bottom: 12px; }
+.dg-doc .dg-h { font-size: 10pt; text-align: center; margin: 12px 0 4px; break-after: avoid; }
+.dg-p { display: grid; grid-template-columns: 14mm 1fr; text-align: justify; margin: 0 0 2px; }
+.dg-dash { list-style: none; padding: 0; margin: 0; }
+.dg-dash li::before { content: '—'; display: inline-block; width: 14mm; }
+.dg-indent { text-indent: 14mm; text-align: justify; margin: 6px 0; }
+.dg-list { margin: 0 0 0 6mm; }
+.dg-annexes { margin: 12px 0 0; }
+.dg-doc .dg-annex { text-align: right; font-style: italic; font-size: 10pt; margin-bottom: 26px; }
+.dg-req { width: 100%; border-collapse: collapse; margin: 26px 0 0; break-inside: avoid; }
+.dg-req th, .dg-req td { border: 1px solid #000; padding: 2px 6px; width: 50%; text-align: left; vertical-align: top; }
+.dg-req th { text-align: center; }
+.dg-req-sign td { height: 6mm; }
+.dg-spec, .dg-mats { width: 100%; border-collapse: collapse; margin: 6px 0 8px; }
+.dg-spec th, .dg-spec td, .dg-mats th, .dg-mats td { border: 1px solid #000; padding: 2px 4px; vertical-align: top; }
+.dg-spec th { text-align: left; }
+.dg-spec td { font-weight: 700; }
+.dg-spec-total td:last-child { text-align: right; }
+.dg-mats th, .dg-mats td:nth-child(1), .dg-mats td:nth-child(3) { text-align: center; }
+.dg-vis-title { text-align: center; font-weight: 700; font-style: italic; margin: 6px 0 10px; }
+.dg-vis img { display: block; max-width: 100%; max-height: 115mm; margin: 0 auto 8px; object-fit: contain; break-inside: avoid; }
+.dg-vis-head { break-inside: avoid; }

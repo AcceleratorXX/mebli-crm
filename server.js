@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
 const { DEFAULT_TEMPLATE, FIRST_VERSION_IDS } = require('./defaults');
+const { pdfDoc, parseInvoice } = require('./pdf-text');
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT) || 3000;
@@ -101,14 +102,14 @@ const str = (v, max = 2000) => (v == null ? '' : String(v).slice(0, max));
 
 const EDITABLE = ['name', 'client', 'phone', 'address', 'furnitureType', 'status', 'deadline',
   'budget', 'notes', 'closedAt', 'questions', 'invoices', 'log', 'reminders',
-  'stages', 'materials', 'estimate', 'approvals', 'handover'];
+  'stages', 'materials', 'estimate', 'approvals', 'handover', 'offer', 'contract'];
 
 function findProject(id) {
   return db.projects.find(p => p.id === id);
 }
 
 async function api(req, res, parts, url) {
-  const [resource, id, sub, subId] = parts;
+  const [resource, id, sub, subId, action] = parts;
   const m = req.method;
 
   if (resource === 'data' && m === 'GET') {
@@ -154,7 +155,7 @@ async function api(req, res, parts, url) {
       name: str(body.name, 300).trim() || 'Без назви',
       client: str(body.client, 300), phone: str(body.phone, 100), address: str(body.address, 500),
       furnitureType: str(body.furnitureType, 200), deadline: str(body.deadline, 20),
-      budget: '', notes: '', status: 'new',
+      budget: '', notes: '', status: 'quote', // кожен проєкт починається з прорахунку
       createdAt: now(), updatedAt: now(), closedAt: null,
       questions: db.template.map(q => ({ ...q, answer: '', na: false })),
       files: [], invoices: [], reminders: [],
@@ -206,6 +207,19 @@ async function api(req, res, parts, url) {
     const f = p.files.find(x => x.id === subId);
     if (!f) return send(res, 404, { error: 'Файл не знайдено' });
     const filePath = path.join(dir, f.id + f.ext);
+
+    // Поля рахунку з тексту PDF: номер, дата, сума, постачальник (знайомий — з «Контактів»).
+    if (action === 'invoice' && m === 'GET') {
+      if (f.ext !== '.pdf') return send(res, 200, { number: '', date: '', amount: 0, counterparty: '', hasText: false });
+      try {
+        const suppliers = db.contacts.filter(c => c.type === 'supplier').map(c => c.name);
+        const doc = pdfDoc(await fsp.readFile(filePath));
+        return send(res, 200, parseInvoice(doc.text, suppliers, doc.rows));
+      } catch (err) {
+        console.error('Не вдалося прочитати PDF:', err);
+        return send(res, 200, { number: '', date: '', amount: 0, counterparty: '', hasText: false });
+      }
+    }
 
     if (m === 'GET') {
       let stat;

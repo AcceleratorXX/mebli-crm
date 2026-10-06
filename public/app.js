@@ -3,7 +3,7 @@
 // ---------- довідники
 
 const STATUSES = [
-  { key: 'new',       label: 'Новий',         color: '#64748b' },
+  { key: 'quote',     label: 'Прорахунок',    color: '#a16207', quote: true },
   { key: 'measure',   label: 'Замір',         color: '#0891b2' },
   { key: 'design',    label: 'Конструювання', color: '#7c3aed' },
   { key: 'approval',  label: 'Погодження',    color: '#d97706' },
@@ -15,28 +15,44 @@ const STATUSES = [
 ];
 const STATUS = Object.fromEntries(STATUSES.map(s => [s.key, s]));
 const isArchived = p => !!STATUS[p.status]?.archived;
+// Прорахунок — ще не замовлення: окремий список «Прорахунки», не серед «Проєктів».
+const isQuote = p => !!STATUS[p.status]?.quote;
+// Спершу — прорахунок (і колишній статус «Новий» теж); коли клієнт погодився — «Замір» і далі.
+const START_STATUS = 'quote';
+const FIRST_STATUS = 'measure';
+const statusOf = p => STATUS[p.status] || STATUS[START_STATUS];
+// Розділ меню, до якого належить проєкт.
+const navOf = p => isArchived(p) ? 'archive' : isQuote(p) ? 'quotes' : '';
 
 const FILE_CATEGORIES = ['Вхідні від клієнта', 'Заміри', 'Креслення / проєкт', 'Фото', 'Фото до', 'Фото після', 'Рахунки', 'Документи', 'Інше'];
 const FURNITURE_TYPES = ['Кухня', 'Шафа-купе', 'Гардероб', 'Передпокій', 'Ванна кімната', 'Дитяча', 'Спальня', 'Вітальня', 'Офісні меблі', 'Інше'];
-const DEFAULT_STAGES = ['Замір', 'Конструювання / креслення', 'Погодження з клієнтом', 'Аванс отримано', 'Замовлення матеріалів',
-  'Порізка та кромкування', 'Присадка / свердління', 'Збірка', 'Доставка', 'Монтаж', 'Здача клієнту'];
-const MATERIAL_CATEGORIES = ['Плита (ДСП / МДФ)', 'Фасади', 'Кромка', 'Фурнітура', 'Стільниця', 'Скло / дзеркало',
-  'Підсвітка / електрика', 'Техніка', 'Мийка / сантехніка', 'Інше'];
-const MAT_STATUS = [
-  { key: 'need',     label: 'Потрібно',  cls: 'bad' },
-  { key: 'ordered',  label: 'Замовлено', cls: 'warn' },
-  { key: 'received', label: 'Отримано',  cls: 'ok' },
-];
-const DEFAULT_WORKS = ['Конструювання', 'Порізка та кромкування', 'Збірка', 'Доставка', 'Монтаж'];
-const DEFAULT_OFFER_NOTE = 'Термін виготовлення — за погодженням після внесення авансу.\nОстаточна вартість може змінитися при зміні проєкту.';
+// Порізку, кромкування й присадку робить ВіЯр — для нас це один етап «Запущено в роботу».
+// Матеріали замовляє ВіЯр разом із порізкою — окремого етапу «Замовлення матеріалів» немає.
+const DEFAULT_STAGES = ['Замір', 'Конструювання / креслення', 'Погодження з клієнтом', 'Аванс отримано',
+  'Запущено в роботу', 'Збірка', 'Доставка', 'Монтаж', 'Здача клієнту'];
+const DROPPED_STAGES = ['Замовлення матеріалів'];
+const VIYAR_STAGES = ['Порізка та кромкування', 'Присадка / свердління'];
 
+// Старі стандартні етапи порізки й присадки → один «Запущено в роботу» (виконаний, якщо виконано хоч один).
+function mergeViyarStages(p) {
+  const old = p.stages.filter(s => VIYAR_STAGES.includes(s.label.trim()));
+  if (!old.length || p.stages.some(s => s.label.trim() === 'Запущено в роботу')) return;
+  const done = old.filter(s => s.done);
+  Object.assign(old[0], {
+    label: 'Запущено в роботу',
+    done: done.length > 0,
+    doneAt: done.map(s => s.doneAt).filter(Boolean).sort()[0] || '',
+    plan: old.map(s => s.plan).filter(Boolean).sort()[0] || '',
+  });
+  p.stages = p.stages.filter(s => !old.slice(1).includes(s));
+}
 const TABS = [
   { key: 'overview',  label: 'Огляд' },
   { key: 'questions', label: 'Питання' },
   { key: 'stages',    label: 'Етапи' },
   { key: 'reminders', label: 'Нагадування' },
-  { key: 'materials', label: 'Матеріали' },
-  { key: 'estimate',  label: 'Кошторис' },
+  { key: 'offer',     label: 'КП' },
+  { key: 'contract',  label: 'Договір' },
   { key: 'files',     label: 'Файли' },
   { key: 'invoices',  label: 'Рахунки' },
   { key: 'handover',  label: 'Здача' },
@@ -125,10 +141,15 @@ function ensureProject(p) {
   p.log ||= [];
   p.reminders ||= [];
   p.stages ||= DEFAULT_STAGES.map(label => ({ id: uid(), label, plan: '', done: false, doneAt: '' }));
+  mergeViyarStages(p);
+  p.stages = p.stages.filter(s => !DROPPED_STAGES.includes(s.label.trim()));
   p.materials ||= [];
-  p.estimate ||= { works: DEFAULT_WORKS.map(name => ({ id: uid(), name, amount: 0 })), markup: 30, discount: 0, advancePct: 50, validDays: 14 };
   p.approvals ||= [];
   p.handover ||= { date: '', warrantyMonths: 24, note: '' };
+  p.offer ||= { date: '', items: [] };
+  p.contract ||= { number: '', date: '', clientDoc: '', pay1: '', pay2: '', days: '' };
+  if (!STATUS[p.status]) p.status = START_STATUS;
+  p.offer.items.forEach(ensureKpItem);
   return p;
 }
 
@@ -146,30 +167,12 @@ function stageStats(p) {
   return { total, done, pct: total ? Math.round((done / total) * 100) : 0, next: p.stages.find(s => !s.done) };
 }
 
+// Рахунки — лише від постачальників (рахунків клієнту більше не ведемо; старі просто не показуємо).
+const supplierInvoices = p => p.invoices.filter(i => i.kind !== 'client');
 function finance(p) {
-  const sum = (kind, field) => p.invoices.filter(i => i.kind === kind).reduce((a, i) => a + num(i[field]), 0);
-  const order = sum('client', 'amount'), paid = sum('client', 'paid'), costs = sum('supplier', 'amount');
-  return { order, paid, due: order - paid, costs, costsPaid: sum('supplier', 'paid'), margin: order - costs };
-}
-
-const matSum = m => num(m.qty) * num(m.price);
-function estimate(p) {
-  const e = p.estimate;
-  const byCat = {};
-  let materials = 0;
-  for (const m of p.materials) {
-    const s = matSum(m);
-    materials += s;
-    const c = m.category || 'Інше';
-    byCat[c] = (byCat[c] || 0) + s;
-  }
-  const k = 1 + num(e.markup) / 100;
-  const materialsPrice = materials * k;
-  const works = e.works.reduce((a, w) => a + num(w.amount), 0);
-  const subtotal = materialsPrice + works;
-  const discount = num(e.discount);
-  const total = Math.max(0, subtotal - discount);
-  return { byCat, k, materials, materialsPrice, works, subtotal, discount, total, advance: total * num(e.advancePct) / 100, profit: total - materials };
+  const list = supplierInvoices(p);
+  const costs = list.reduce((a, i) => a + num(i.amount), 0), paid = list.reduce((a, i) => a + num(i.paid), 0);
+  return { count: list.length, costs, paid, due: costs - paid };
 }
 
 function invStatus(i) {
@@ -330,7 +333,7 @@ async function route() {
     }
     state.current = p;
     state.tab = TABS.some(t => t.key === tab) ? tab : 'overview';
-    nav = isArchived(p) ? 'archive' : '';
+    nav = navOf(p);
     viewProject();
   } else {
     state.current = null;
@@ -338,7 +341,7 @@ async function route() {
     else if (page === 'board') viewBoard();
     else if (page === 'calendar') viewCalendar(id);
     else if (page === 'contacts') viewContacts();
-    else viewList(page === 'archive');
+    else viewList(page === 'archive' || page === 'quotes' ? page : '');
   }
   updateNav(nav);
   if (pageChanged) window.scrollTo(0, 0);
@@ -353,13 +356,15 @@ function progress(done, total, pct) {
   return `<div class="progress"><div style="width:${pct}%"></div></div><div class="muted small">${done}/${total}</div>`;
 }
 
-function viewList(archived) {
-  state.listArchived = archived;
-  const pool = state.projects.filter(p => isArchived(p) === archived);
-  const chips = archived ? '' : `
+// Список проєктів розділу меню: '' — «Проєкти» (замовлення в роботі), 'quotes' — «Прорахунки», 'archive' — «Архів».
+function viewList(kind) {
+  state.listKind = kind;
+  const archived = kind === 'archive', quotes = kind === 'quotes', active = kind === '';
+  const pool = state.projects.filter(p => navOf(p) === kind);
+  const chips = !active ? '' : `
     <div class="chips">
       <button class="chip ${state.filter === 'all' ? 'on' : ''}" data-action="filter" data-v="all">Усі <b>${pool.length}</b></button>
-      ${STATUSES.filter(s => !s.archived).map(s => {
+      ${STATUSES.filter(s => !s.archived && !s.quote).map(s => {
         const n = pool.filter(p => p.status === s.key).length;
         return `<button class="chip ${state.filter === s.key ? 'on' : ''}" data-action="filter" data-v="${s.key}" style="--c:${s.color}"><i></i>${s.label} <b>${n}</b></button>`;
       }).join('')}
@@ -367,16 +372,36 @@ function viewList(archived) {
 
   app.innerHTML = `
     <div class="page-head">
-      <h1>${archived ? 'Архів' : 'Проєкти'}</h1>
+      <h1>${archived ? 'Архів' : quotes ? 'Прорахунки' : 'Проєкти'}</h1>
       <div class="spacer"></div>
       <input type="search" class="search" placeholder="Пошук: назва, клієнт, телефон…" value="${esc(state.search)}" data-action="search">
-      ${archived ? '' : '<button class="btn primary" data-action="new-project">+ Новий проєкт</button>'}
+      ${archived ? '' : quotes ? '<button class="btn primary" data-action="new-quote">+ Новий прорахунок</button>' : '<button class="btn primary" data-action="new-quote">+ Новий прорахунок</button>'}
     </div>
-    ${archived ? '' : '<div id="rem-panel"></div>'}
+    ${active ? '<div id="rem-panel"></div>' : ''}
+    ${quotes ? '<p class="muted" style="margin-top:0">Прорахунки — ще не замовлення: КП для клієнта. Коли клієнт погодиться — кнопка «✓ Клієнт погодився» в прорахунку перенесе його в «Проєкти».</p>' : ''}
     ${chips}
     <div id="list-body"></div>`;
-  if (!archived) renderReminderPanel();
+  if (active) renderReminderPanel();
   renderListBody();
+}
+
+const kpSum = p => p.offer.items.reduce((a, it) => a + kpTotal(it), 0);
+
+function quotesTable(list) {
+  return `
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>№</th><th>Прорахунок</th><th>Клієнт</th><th class="r">Сума КП</th><th>Виробів</th><th>Створено</th><th>Оновлено</th></tr></thead>
+      <tbody>${list.map(p => `
+        <tr data-go="#/project/${p.id}/offer">
+          <td class="num">${p.number}</td>
+          <td><div class="strong">${esc(p.name)}</div><div class="muted small">${esc(p.furnitureType || '')}</div></td>
+          <td>${esc(p.client || '—')}<div class="muted small">${esc(p.phone || '')}</div></td>
+          <td class="r nowrap">${p.offer.items.length ? money(kpSum(p)) : '<span class="muted">—</span>'}</td>
+          <td>${p.offer.items.length || '<span class="muted">—</span>'}</td>
+          <td class="muted small">${fmtDate(p.createdAt)}</td>
+          <td class="muted small">${fmtDate(p.updatedAt)}</td>
+        </tr>`).join('')}</tbody>
+    </table></div>`;
 }
 
 function renderReminderPanel() {
@@ -422,24 +447,29 @@ function remRow(r, p, withProject = false) {
 }
 
 function renderListBody() {
-  const archived = state.listArchived;
+  const kind = state.listKind ?? '';
+  const archived = kind === 'archive', quotes = kind === 'quotes';
   const q = state.search.trim().toLowerCase();
-  let list = state.projects.filter(p => isArchived(p) === archived);
-  if (!archived && state.filter !== 'all') list = list.filter(p => p.status === state.filter);
+  let list = state.projects.filter(p => navOf(p) === kind);
+  const pool = list.length;
+  if (kind === '' && state.filter !== 'all') list = list.filter(p => p.status === state.filter);
   if (q) list = list.filter(p => [p.number, p.name, p.client, p.phone, p.address, p.furnitureType].join(' ').toLowerCase().includes(q));
 
   if (archived) list.sort((a, b) => (b.closedAt || b.updatedAt).localeCompare(a.closedAt || a.updatedAt));
+  else if (quotes) list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   else list.sort((a, b) => (a.deadline || '9999').localeCompare(b.deadline || '9999') || b.updatedAt.localeCompare(a.updatedAt));
 
   const body = $('#list-body');
   if (!list.length) {
     body.innerHTML = `<div class="empty">${
-      state.projects.length === 0 && !archived
-        ? 'Ще немає жодного проєкту. Натисніть «+ Новий проєкт», щоб почати.'
-        : archived ? 'Архів порожній. Сюди потрапляють проєкти зі статусом «Закритий» або «Скасований».' : 'Нічого не знайдено.'
+      pool && q ? 'Нічого не знайдено.'
+        : archived ? 'Архів порожній. Сюди потрапляють проєкти зі статусом «Закритий» або «Скасований».'
+          : quotes ? 'Прорахунків немає. Натисніть «+ Новий прорахунок», щоб зробити КП для клієнта.'
+            : pool ? 'Нічого не знайдено.' : 'Проєктів у роботі ще немає. Кожен проєкт починається з прорахунку («+ Новий прорахунок»); коли клієнт погодиться — він з\'явиться тут.'
     }</div>`;
     return;
   }
+  if (quotes) { body.innerHTML = quotesTable(list); return; }
   const today = localDate();
   body.innerHTML = `
     <div class="table-wrap"><table class="table">
@@ -447,7 +477,7 @@ function renderListBody() {
         <th>№</th><th>Проєкт</th><th>Клієнт</th><th>Статус</th><th>${archived ? 'Гарантія до' : 'Етап'}</th><th>Дедлайн</th><th>Питання</th><th>${archived ? 'Закрито' : 'Оновлено'}</th>
       </tr></thead>
       <tbody>${list.map(p => {
-        const s = STATUS[p.status] || STATUSES[0];
+        const s = statusOf(p);
         const overdue = !archived && p.deadline && p.deadline < today;
         const due = archived ? 0 : dueReminders(p).length;
         const qs = qStats(p), st = stageStats(p);
@@ -469,9 +499,9 @@ function renderListBody() {
     </table></div>`;
 }
 
-function newProjectDialog() {
+function newProjectDialog(quote = false) {
   const form = openDialog({
-    title: 'Новий проєкт',
+    title: quote ? 'Новий прорахунок' : 'Новий проєкт',
     submitLabel: 'Створити',
     body: `
       <label class="field"><span>Назва *</span><input name="name" required placeholder="Напр.: Кухня, вул. Шевченка 10"></label>
@@ -485,10 +515,10 @@ function newProjectDialog() {
       <p class="muted small">Питання для проєкту буде скопійовано з шаблону. Новий клієнт автоматично потрапить у «Контакти».</p>`,
     onSubmit: async form => {
       const data = Object.fromEntries(new FormData(form));
-      const p = ensureProject(await request('POST', '/api/projects', data));
+      const p = ensureProject(await request('POST', '/api/projects', quote ? { ...data, status: 'quote' } : data));
       state.projects.push(p);
       await rememberContact('client', data.client, { phone: data.phone, address: data.address });
-      location.hash = `#/project/${p.id}/questions`;
+      location.hash = `#/project/${p.id}/${quote ? 'offer' : 'questions'}`;
     },
   });
   form.elements.client.addEventListener('change', () => {
@@ -524,7 +554,7 @@ function viewBoard() {
       <h1>Дошка</h1>
       <span class="muted small">Перетягуйте картки між колонками, щоб змінити статус</span>
       <div class="spacer"></div>
-      <button class="btn primary" data-action="new-project">+ Новий проєкт</button>
+      <button class="btn primary" data-action="new-quote">+ Новий прорахунок</button>
     </div>
     <div class="board">
       ${STATUSES.filter(s => !s.archived).map(s => {
@@ -646,7 +676,6 @@ function supplierStats(c) {
   const projects = new Set();
   for (const p of state.projects) {
     for (const i of p.invoices) if (i.kind === 'supplier' && sameName(i.counterparty, c.name)) { invoices++; sum += num(i.amount); projects.add(p); }
-    for (const m of p.materials) if (sameName(m.supplier, c.name)) projects.add(p);
   }
   return { invoices, sum, projects: [...projects] };
 }
@@ -719,14 +748,15 @@ function viewProject() {
 
 function renderHead() {
   const p = state.current;
-  const archived = isArchived(p);
-  const s = STATUS[p.status] || STATUSES[0];
+  const s = statusOf(p);
+  const back = { archive: ['#/archive', 'Архів'], quotes: ['#/quotes', 'Прорахунки'], '': ['#/', 'Проєкти'] }[navOf(p)];
   $('#proj-head').innerHTML = `
-    <a class="back" href="${archived ? '#/archive' : '#/'}">← ${archived ? 'Архів' : 'Проєкти'}</a>
+    <a class="back" href="${back[0]}">← ${back[1]}</a>
     <div class="title-row">
       <span class="num-big">№${p.number}</span>
       <h1>${esc(p.name)}</h1>
       <div class="spacer"></div>
+      ${isQuote(p) ? '<button class="btn primary" data-action="quote-accept" title="Перенести в «Проєкти» зі статусом «Замір»">✓ Клієнт погодився → у проєкти</button>' : ''}
       <label class="status-pick" style="--c:${s.color}" title="Статус проєкту"><i></i>
         <select data-action="status">${STATUSES.map(x => `<option value="${x.key}" ${x.key === p.status ? 'selected' : ''}>${x.label}</option>`).join('')}</select>
       </label>
@@ -741,7 +771,7 @@ function renderTabs() {
     questions: qStats(p).open,
     stages: st.total ? `${st.done}/${st.total}` : 0,
     reminders: openReminders(p).length,
-    materials: p.materials.filter(m => m.status !== 'received').length,
+    offer: p.offer.items.length,
     files: p.files.length,
     invoices: p.invoices.length,
     log: p.log.length,
@@ -757,6 +787,7 @@ function renderTabs() {
 const TAB_VIEWS = {};
 function renderTab() {
   $('#tab-body').innerHTML = TAB_VIEWS[state.tab](state.current);
+  if (state.tab === 'invoices') backfillInvoices(state.current);
 }
 function refreshTab() {
   renderTab();
@@ -782,7 +813,7 @@ function changeStatus(p, key) {
     renderHead();
     renderTabs();
     if (['log', 'overview', 'handover'].includes(state.tab)) renderTab();
-    updateNav(isArchived(p) ? 'archive' : '');
+    updateNav(navOf(p));
   }
 }
 
@@ -791,7 +822,7 @@ function changeStatus(p, key) {
 TAB_VIEWS.overview = p => {
   const F = (field, label, type = 'text', cls = '', attrs = '') =>
     `<label class="field ${cls}"><span>${label}</span><input type="${type}" data-field="${field}" value="${esc(p[field] ?? '')}" ${attrs}></label>`;
-  const qs = qStats(p), f = finance(p), st = stageStats(p), e = estimate(p);
+  const qs = qStats(p), f = finance(p), st = stageStats(p), offer = kpSum(p);
   const nextRem = openReminders(p).sort((a, b) => remDue(a).localeCompare(remDue(b)))[0];
   const fileCounts = [...new Set(p.files.map(x => x.category))].map(c => [c, p.files.filter(x => x.category === c).length]);
   const we = warrantyEnd(p);
@@ -828,11 +859,10 @@ TAB_VIEWS.overview = p => {
         </a>
         <a class="card link-card" href="#/project/${p.id}/invoices">
           <h3>Фінанси</h3>
-          ${e.total ? `<div class="kv"><span>За кошторисом</span><b>${money(e.total)}</b></div>` : ''}
-          <div class="kv"><span>Виставлено клієнту</span><b>${money(f.order)}</b></div>
+          ${offer ? `<div class="kv"><span>За КП</span><b>${money(offer)}</b></div>` : ''}
+          <div class="kv"><span>Рахунки постачальників (${f.count})</span><b>${money(f.costs)}</b></div>
           <div class="kv"><span>Оплачено</span><b>${money(f.paid)}</b></div>
-          <div class="kv"><span>Залишок</span><b class="${f.due > 0 ? 'warn-text' : ''}">${money(f.due)}</b></div>
-          <div class="kv"><span>Витрати</span><b>${money(f.costs)}</b></div>
+          <div class="kv"><span>Не оплачено</span><b class="${f.due > 0 ? 'warn-text' : ''}">${money(f.due)}</b></div>
         </a>
         <a class="card link-card" href="#/project/${p.id}/files">
           <h3>Файли</h3>
@@ -993,7 +1023,7 @@ TAB_VIEWS.stages = p => {
           <span class="st-num muted">${i + 1}</span>
           <input class="st-label" data-action="st-label" value="${esc(s.label)}">
           <label class="st-date small muted">План <input type="date" data-action="st-plan" value="${s.plan || ''}"></label>
-          <span class="st-doneat small">${s.done ? `✓ ${fmtDate(s.doneAt)}` : ''}</span>
+          <span class="st-doneat small">${s.done ? `<label title="Коли виконано — можна змінити">✓ <input type="date" data-action="st-doneat" value="${s.doneAt || ''}"></label>` : ''}</span>
           <span class="nowrap">
             <button class="icon-btn" data-action="st-up" title="Вище">↑</button>
             <button class="icon-btn" data-action="st-down" title="Нижче">↓</button>
@@ -1031,7 +1061,7 @@ function approvalDialog() {
   openDialog({
     title: 'Погодження з клієнтом',
     body: `
-      <label class="field"><span>Що погоджено *</span><input name="title" required placeholder="Проєкт v2, колір фасадів, розміри, кошторис…"></label>
+      <label class="field"><span>Що погоджено *</span><input name="title" required placeholder="Проєкт v2, колір фасадів, розміри, КП…"></label>
       <div class="row2">
         <label class="field"><span>Дата</span><input type="date" name="date" value="${localDate()}" required></label>
         <label class="field"><span>Як погоджено</span><input name="how" placeholder="Viber, підпис, email, усно"></label>
@@ -1131,151 +1161,511 @@ function checkReminders() {
   if (!state.current && $('#rem-panel')) renderReminderPanel();
 }
 
-// --- Матеріали
+// --- КП (комерційна пропозиція: титульна сторінка + сторінка на кожен виріб)
 
-function matStatsHtml(p) {
-  const total = p.materials.reduce((a, m) => a + matSum(m), 0);
-  const cnt = k => p.materials.filter(m => m.status === k).length;
+const KP_MAX_IMAGES = 4;
+const KP_IMAGE_CATEGORY = 'Креслення / проєкт';
+
+function plural(n, one, few, many) {
+  n = Math.abs(Math.trunc(num(n)));
+  const t = n % 100, u = n % 10;
+  if (t >= 11 && t <= 14) return many;
+  if (u === 1) return one;
+  return u >= 2 && u <= 4 ? few : many;
+}
+// **жирний**, [[червоний]]
+const kpLine = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/\[\[(.+?)\]\]/g, '<span class="kp-red">$1</span>');
+const kpQty = it => num(it.qty) || 1;
+// Підпис рядка ціни за 1 шт; число там — не підпис (раніше туди вписували суму).
+const kpUnitLabel = it => { const s = String(it.unitLabel || '').trim(); return s && !/^[\d\s.,]+$/.test(s) ? s : 'Вартість одного виробу'; };
+const kpTotal = it => kpQty(it) * num(it.price);
+const kpSumText = it => kpQty(it) > 1 ? `${fmtNum(kpQty(it))} шт × ${money(it.price)} = ${money(kpTotal(it))}` : money(it.price);
+const newKpItem = p => ({ id: uid(), title: p.offer.items.length ? '' : (p.furnitureType || ''), imageIds: [], list: [''], qty: 1, price: 0, unitLabel: '', days: 20, warranty: 24 });
+// Рядки матеріалів раніше були одним текстом із нумерацією вручну — тепер список, номер ставиться сам.
+function ensureKpItem(it) {
+  if (!Array.isArray(it.list)) {
+    it.list = String(it.lines || '').split('\n').map(l => l.trim().replace(/^\d+\s*[.)]\s*/, '')).filter(Boolean);
+    delete it.lines;
+  }
+  if (!it.list.length) it.list.push('');
+  return it;
+}
+// Новий рядок після `after` (або в кінці) — і курсор у нього.
+function kpAddLine(it, after = it.list.length - 1) {
+  it.list.splice(after + 1, 0, '');
+  saveSoon(0);
+  renderTab();
+  app.querySelector(`[data-kid="${it.id}"] [data-li="${after + 1}"] input`)?.focus();
+}
+// Матеріали й фурнітура з рахунків постачальників — для списку в КП; послуги (порізка, крайкування…) — ні.
+const SERVICE = /порізк|підрізк|крайкуван|свердлін|присадк|фрезерн|комплектуван|доставк|упаковк|пакуван|послуг/i;
+const invoiceGoods = p => [...new Set(supplierInvoices(p).flatMap(i => i.items || []).map(it => it.name.trim()).filter(n => n && !SERVICE.test(n)))];
+const findKpItem = (p, el) => p.offer.items.find(x => x.id === el.closest('[data-kid]').dataset.kid);
+
+function kpItemHtml(p, it, i, imgs) {
+  const n = p.offer.items.length;
+  const I = (k, label, type = 'number') => `<label class="field"><span>${label}</span><input type="${type}" ${type === 'number' ? 'step="any"' : ''} data-action="kpi" data-k="${k}" value="${esc(it[k])}"></label>`;
   return `
-    <div class="stat"><div class="muted small">Позицій</div><div class="stat-v">${p.materials.length}</div></div>
-    <div class="stat"><div class="muted small">Сума матеріалів</div><div class="stat-v">${money(total)}</div></div>
-    <div class="stat ${cnt('need') ? 'bad' : ''}"><div class="muted small">Потрібно замовити</div><div class="stat-v">${cnt('need')}</div></div>
-    <div class="stat ${cnt('ordered') ? 'warn' : ''}"><div class="muted small">Замовлено, чекаємо</div><div class="stat-v">${cnt('ordered')}</div></div>
-    <div class="stat ok"><div class="muted small">Отримано</div><div class="stat-v">${cnt('received')}</div></div>`;
+    <div class="card kp-item" data-kid="${it.id}">
+      <div class="card-head">
+        <span class="muted">${i + 1}.</span>
+        <input class="t-group-name" data-action="kpi" data-k="title" value="${esc(it.title)}" placeholder="Назва виробу: Стіл, Кухня, Інсталяція…">
+        <div class="spacer"></div>
+        ${n > 1 ? `<button class="icon-btn" data-action="kp-up" title="Вище">↑</button><button class="icon-btn" data-action="kp-down" title="Нижче">↓</button>` : ''}
+        <button class="icon-btn" data-action="kp-del" title="Видалити виріб">✕</button>
+      </div>
+      <div class="kp-edit">
+        <div>
+          <div class="muted small">Зображення на сторінці (до ${KP_MAX_IMAGES}) — клікніть, щоб обрати. <b>Ctrl+V</b> — вставити знімок екрана з Базиса.</div>
+          <div class="kp-thumbs">
+            ${imgs.map(f => {
+              const k = it.imageIds.indexOf(f.id);
+              return `<button class="kp-thumb ${k >= 0 ? 'on' : ''}" data-action="kp-img" data-fid="${f.id}" title="${esc(f.name)}"><img src="${fileUrl(p, f)}" loading="lazy" alt="">${k >= 0 ? `<span class="kp-n">${k + 1}</span>` : ''}</button>`;
+            }).join('')}
+            <label class="kp-thumb kp-upload" title="Завантажити зображення">+<input type="file" accept="image/*" multiple hidden data-action="kp-upload"></label>
+          </div>
+        </div>
+        <div>
+          <div class="field"><span>Матеріали та фурнітура — у КП пронумеруються самі</span></div>
+          <div class="kp-list">
+            ${it.list.map((line, li) => `
+              <div class="kp-li" data-li="${li}">
+                <span class="muted">${li + 1}.</span>
+                <input data-action="kpl" value="${esc(line)}" list="kp-mat-list" placeholder="${li ? '' : 'ДСП Kronospan 7045 SU Сатин 2800х2070х18мм'}">
+                <button class="icon-btn" data-action="kpl-up" title="Вище" ${li ? '' : 'disabled'}>↑</button>
+                <button class="icon-btn" data-action="kpl-down" title="Нижче" ${li < it.list.length - 1 ? '' : 'disabled'}>↓</button>
+                <button class="icon-btn" data-action="kpl-del" title="Видалити">✕</button>
+              </div>`).join('')}
+          </div>
+          <div class="muted small kp-hint">
+            <span><button class="link-btn" data-action="kpl-add">+ рядок</button> (або Enter) · <code>**текст**</code> — жирний, <code>[[текст]]</code> — червоний</span>
+            <button class="link-btn" data-action="kp-mats" title="Матеріали й фурнітура з рахунків постачальників (без послуг)">+ з рахунків</button>
+          </div>
+        </div>
+      </div>
+      <div class="kp-nums">
+        ${I('qty', 'Кількість, шт')}
+        ${I('price', 'Ціна за 1 шт, грн')}
+        ${I('days', 'Термін, робочих днів')}
+        ${I('warranty', 'Гарантія, місяців')}
+        ${I('unitLabel', 'Текст рядка ціни за 1 шт, напр. «Вартість одного стола»', 'text')}
+      </div>
+      <div class="kp-sum">Вартість: <b>${kpSumText(it)}</b></div>
+    </div>`;
 }
 
-TAB_VIEWS.materials = p => {
-  const f = state.matFilter;
-  const items = p.materials.filter(m => f === 'all' || m.status === f);
+TAB_VIEWS.offer = p => {
+  const o = p.offer, s = state.settings;
+  const imgs = p.files.filter(f => IMG_EXT.test(f.ext));
+  const total = o.items.reduce((a, it) => a + kpTotal(it), 0);
   return `
-    <div class="stats" id="mat-stats">${matStatsHtml(p)}</div>
     <div class="toolbar">
-      <div class="seg">
-        <button class="${f === 'all' ? 'on' : ''}" data-action="mat-filter" data-v="all">Усі</button>
-        ${MAT_STATUS.map(s => `<button class="${f === s.key ? 'on' : ''}" data-action="mat-filter" data-v="${s.key}">${s.label}</button>`).join('')}
-      </div>
+      <label class="field inline"><span>Дата КП</span><input type="date" data-action="kp" data-k="date" value="${esc(o.date || localDate())}"></label>
       <div class="spacer"></div>
-      <button class="btn" data-action="mat-copy" title="Скопіювати список «Потрібно» по постачальниках">📋 Список для замовлення</button>
-      <button class="btn primary" data-action="mat-add">+ Позиція</button>
+      ${o.items.length > 1 ? `<span class="muted">Разом: <b id="kp-total">${money(total)}</b></span>` : ''}
+      <button class="btn" data-action="kp-add">+ Виріб</button>
+      <button class="btn primary" data-action="kp-print" ${o.items.length ? '' : 'disabled'}>🖨 КП (PDF)</button>
     </div>
-    ${p.materials.length ? `
-      <div class="table-wrap"><table class="table compact mat-table">
-        <thead><tr><th>Найменування</th><th>Категорія</th><th>Постачальник</th><th class="r">К-сть</th><th>Од.</th><th class="r">Ціна</th><th class="r">Сума</th><th>Статус</th><th></th></tr></thead>
-        <tbody>${items.map(m => {
-          const s = MAT_STATUS.find(x => x.key === m.status) || MAT_STATUS[0];
-          return `<tr data-mid="${m.id}">
-            <td><input data-action="mat" data-k="name" value="${esc(m.name)}" placeholder="ДСП Egger W1000 18мм"></td>
-            <td><select data-action="mat" data-k="category">${MATERIAL_CATEGORIES.map(c => `<option ${c === m.category ? 'selected' : ''}>${c}</option>`).join('')}</select></td>
-            <td><input data-action="mat" data-k="supplier" value="${esc(m.supplier)}" list="suppliers-list" autocomplete="off"></td>
-            <td><input class="r w-num" type="number" step="any" data-action="mat" data-k="qty" value="${esc(m.qty)}"></td>
-            <td><input class="w-unit" data-action="mat" data-k="unit" value="${esc(m.unit)}" list="units-list"></td>
-            <td><input class="r w-num" type="number" step="any" data-action="mat" data-k="price" value="${esc(m.price)}"></td>
-            <td class="r nowrap m-sum">${money(matSum(m))}</td>
-            <td><select class="pill-select ${s.cls}" data-action="mat" data-k="status">${MAT_STATUS.map(x => `<option value="${x.key}" ${x.key === m.status ? 'selected' : ''}>${x.label}</option>`).join('')}</select></td>
-            <td><button class="icon-btn" data-action="mat-del" title="Видалити">✕</button></td>
-          </tr>`;
-        }).join('') || '<tr><td colspan="9" class="muted">Немає позицій з таким статусом</td></tr>'}</tbody>
-      </table></div>` : '<div class="empty">Додайте матеріали та фурнітуру, які потрібні для проєкту: плиту, кромку, петлі, шухляди, стільницю…<br>Сума автоматично піде в «Кошторис».</div>'}`;
+    ${!s.logo && !s.brand ? '<div class="card muted small">Логотип, назву бренду, телефон, email, Instagram і адресу для титульної сторінки КП заповніть у <a href="#/settings">Налаштуваннях</a>.</div>' : ''}
+    <datalist id="kp-mat-list">${invoiceGoods(p).map(n => `<option value="${esc(n)}">`).join('')}</datalist>
+    ${o.items.map((it, i) => kpItemHtml(p, it, i, imgs)).join('') || '<div class="empty">Комерційна пропозиція: титульна сторінка з логотипом і контактами, далі по сторінці на кожен виріб — зображення, матеріали, вартість, термін і гарантія.<br><br><button class="btn primary" data-action="kp-add">+ Додати виріб</button></div>'}`;
 };
 
-function copyOrderList(p) {
-  const need = p.materials.filter(m => m.status === 'need' && m.name.trim());
-  if (!need.length) return toast('Немає позицій зі статусом «Потрібно»');
-  const bySupplier = {};
-  for (const m of need) (bySupplier[m.supplier.trim() || 'Без постачальника'] ||= []).push(m);
-  const text = Object.entries(bySupplier).map(([s, items]) =>
-    `${s}:\n${items.map(m => `- ${m.name} — ${fmtNum(m.qty)} ${m.unit}`).join('\n')}`).join('\n\n');
-  copyText(`Замовлення для проєкту «${p.name}»\n\n${text}`, `Скопійовано ${need.length} позицій`);
+async function kpAddImages(p, it, files) {
+  files = [...files].filter(f => f.type.startsWith('image/'));
+  if (!files.length) return toast('Потрібне зображення (JPG, PNG…)', true);
+  for (const [i, f] of files.entries()) {
+    toast(`Завантаження ${i + 1}/${files.length}`);
+    const name = f.name && f.name !== 'image.png' ? f.name : `КП_${localDate()}_${uid().slice(0, 4)}.png`;
+    const r = await request('POST', `/api/projects/${p.id}/files?name=${encodeURIComponent(name)}&category=${encodeURIComponent(KP_IMAGE_CATEGORY)}`, f, true);
+    p.files = r.files;
+    if (it.imageIds.length < KP_MAX_IMAGES) it.imageIds.push(r.file.id);
+  }
+  toast(files.length === 1 ? 'Зображення додано' : `Додано зображень: ${files.length}`);
+  saveSoon(0);
+  if (state.current === p && state.tab === 'offer') refreshTab();
 }
 
-// --- Кошторис
-
-function estMatHtml(p) {
-  const c = estimate(p);
-  const cats = Object.entries(c.byCat);
-  return `
-    <div class="card-head"><h3>Матеріали та фурнітура</h3><div class="spacer"></div><a class="small" href="#/project/${p.id}/materials">редагувати →</a></div>
-    ${cats.length ? `<table class="table compact">
-      <thead><tr><th>Категорія</th><th class="r">Собівартість</th><th class="r">З націнкою</th></tr></thead>
-      <tbody>${cats.map(([cat, s]) => `<tr><td>${esc(cat)}</td><td class="r nowrap">${money(s)}</td><td class="r nowrap">${money(s * c.k)}</td></tr>`).join('')}
-        <tr class="total-row"><td>Разом</td><td class="r nowrap">${money(c.materials)}</td><td class="r nowrap">${money(c.materialsPrice)}</td></tr>
-      </tbody></table>` : '<div class="muted">Матеріалів ще немає — додайте їх на вкладці «Матеріали».</div>'}`;
+function kpLogoHtml() {
+  const s = state.settings;
+  if (s.logo) return `<img class="kp-logo-img" src="${esc(s.logo)}" alt="">`;
+  const b = [...String(s.brand || '').trim()];
+  if (b.length === 4) return `<div class="kp-logo-grid">${b.map(c => `<span>${esc(c)}</span>`).join('')}</div>`;
+  return b.length ? `<div class="kp-logo-text">${esc(b.join(''))}</div>` : '';
 }
 
-function estSummaryHtml(p) {
-  const c = estimate(p), e = p.estimate;
-  return `
-    <div class="kv"><span>Матеріали (собівартість)</span><b>${money(c.materials)}</b></div>
-    <div class="kv"><span>Матеріали з націнкою ${fmtNum(e.markup)}%</span><b>${money(c.materialsPrice)}</b></div>
-    <div class="kv"><span>Роботи та послуги</span><b>${money(c.works)}</b></div>
-    ${c.discount ? `<div class="kv"><span>Знижка</span><b>− ${money(c.discount)}</b></div>` : ''}
-    <div class="kv total"><span>До сплати клієнтом</span><b>${money(c.total)}</b></div>
-    <div class="kv"><span>Аванс ${fmtNum(e.advancePct)}%</span><b>${money(c.advance)}</b></div>
-    <div class="kv"><span>Ваш заробіток (без матеріалів)</span><b class="ok-text">${money(c.profit)}</b></div>`;
+// Зображення ширші за висоту — одне під одним, вищі — поруч в один ряд. Широких 3–4 — сіткою 2×2.
+function kpColumns(imgs, ratios) {
+  const n = imgs.length;
+  if (n < 2) return 1;
+  const wide = imgs.reduce((s, f) => s + (ratios.get(f.id) ?? 1), 0) / n > 1;
+  if (wide) return n > 2 ? 2 : 1;
+  return n > 3 ? 2 : n;
 }
 
-TAB_VIEWS.estimate = p => {
-  const e = p.estimate;
-  const E = (k, label, step = 'any') => `<label class="field"><span>${label}</span><input type="number" step="${step}" data-action="est" data-k="${k}" value="${esc(e[k])}"></label>`;
+// Співвідношення ширина / висота кожного зображення — щоб розкласти їх на сторінці.
+function imageRatios(p, ids) {
+  return Promise.all(ids.map(id => new Promise(resolve => {
+    const f = p.files.find(x => x.id === id);
+    if (!f) return resolve([id, 1]);
+    const img = new Image();
+    img.onload = () => resolve([id, img.naturalWidth / (img.naturalHeight || 1)]);
+    img.onerror = () => resolve([id, 1]);
+    img.src = fileUrl(p, f);
+  }))).then(pairs => new Map(pairs));
+}
+
+function kpItemPage(p, it, ratios) {
+  const imgs = it.imageIds.map(id => p.files.find(f => f.id === id)).filter(Boolean);
+  const lines = it.list.map(l => l.trim()).filter(Boolean).map((l, i) => `${i + 1}. ${l}`);
+  while (lines.length < 4) lines.push('');
+  const q = kpQty(it);
+  const rows = q > 1
+    ? [[kpUnitLabel(it), money(it.price)], [`Загальна вартість (${fmtNum(q)} шт)`, money(kpTotal(it))]]
+    : [['Вартість', money(it.price)]];
+  if (num(it.days)) rows.push(['Термін виконання', `${fmtNum(it.days)} ${plural(it.days, 'робочий день', 'робочі дні', 'робочих днів')}`]);
+  if (num(it.warranty)) rows.push(['Гарантія', `${fmtNum(it.warranty)} ${plural(it.warranty, 'місяць', 'місяці', 'місяців')}`]);
   return `
+    <section class="kp-page"><div class="kp-sheet">
+      <div class="kp-title">${esc(it.title || p.furnitureType || p.name)}</div>
+      <div class="kp-images" style="grid-template-columns: repeat(${kpColumns(imgs, ratios)}, 1fr)">${imgs.map(f => `<img src="${fileUrl(p, f)}" alt="">`).join('')}</div>
+      ${lines.map(l => `<div class="kp-row">${kpLine(l) || '&nbsp;'}</div>`).join('')}
+      <div class="kp-prices">${rows.map(([k, v]) => `<div>${esc(k)}</div><div class="r"><b>${esc(v)}</b></div>`).join('')}</div>
+    </div></section>`;
+}
+
+async function printKp(p) {
+  const o = p.offer, s = state.settings;
+  if (!o.items.length) return toast('Додайте хоча б один виріб', true);
+  const ratios = await imageRatios(p, o.items.flatMap(it => it.imageIds));
+  const date = fmtDate(o.date || localDate());
+  const contacts = [
+    s.tagline && esc(s.tagline), s.phone && esc(s.phone), s.email && `<u>${esc(s.email)}</u>`,
+    s.instagram && `<u>${esc(s.instagram)}</u>`, s.address && esc(s.address),
+  ].filter(Boolean);
+  let summary = '';
+  if (o.items.length > 1) {
+    const total = o.items.reduce((a, it) => a + kpTotal(it), 0);
+    summary = `
+      <section class="kp-page"><div class="kp-sheet auto">
+        <div class="kp-title">Загальна вартість</div>
+        <div class="kp-prices">${o.items.map(it => `<div>${esc(it.title || p.name)}${kpQty(it) > 1 ? ` (${fmtNum(kpQty(it))} шт)` : ''}</div><div class="r">${money(kpTotal(it))}</div>`).join('')}
+          <div><b>Разом</b></div><div class="r"><b>${money(total)}</b></div></div>
+      </div></section>`;
+  }
+  // Ім'я PDF за замовчуванням: КП_INOM_06.10.2026 (бренд з «Налаштувань»).
+  const fileName = ['КП', s.brand || s.companyName, date].map(x => String(x || '').trim()).filter(Boolean).join('_').replace(/[\\/:*?"<>|]+/g, '-');
+  printDoc(fileName, `
+    <div class="kp">
+      <section class="kp-page">
+        <div class="kp-cover-top"><div>${kpLogoHtml()}</div><b>${date} р.</b></div>
+        <div class="kp-contacts">${contacts.join('<br>')}</div>
+      </section>
+      ${o.items.map(it => kpItemPage(p, it, ratios)).join('')}
+      ${summary}
+    </div>`);
+}
+
+// --- Договір (за зразком «№148_19_09_2026_Договір_меблі»: текст дослівно; дані — з проєкту, КП, рахунків і «Налаштувань»)
+
+const MONTHS_GEN = ['січня', 'лютого', 'березня', 'квітня', 'травня', 'червня', 'липня', 'серпня', 'вересня', 'жовтня', 'листопада', 'грудня'];
+
+// «19» вересня 2026 року / 19 вересня 2026 року
+function dateWords(iso, quoted = true) {
+  const [y, m, d] = (iso || localDate()).split('-');
+  return `${quoted ? `«${d}»` : Number(d)} ${MONTHS_GEN[Number(m) - 1]} ${y} року`;
+}
+
+// Сума прописом: «сто тисяч гривень, 00 копійок».
+function moneyWords(amount) {
+  const ONES_M = ['', 'один', 'два', 'три', 'чотири', "п'ять", 'шість', 'сім', 'вісім', "дев'ять"];
+  const ONES_F = ['', 'одна', 'дві', 'три', 'чотири', "п'ять", 'шість', 'сім', 'вісім', "дев'ять"];
+  const TEENS = ['десять', 'одинадцять', 'дванадцять', 'тринадцять', 'чотирнадцять', "п'ятнадцять", 'шістнадцять', 'сімнадцять', 'вісімнадцять', "дев'ятнадцять"];
+  const TENS = ['', '', 'двадцять', 'тридцять', 'сорок', "п'ятдесят", 'шістдесят', 'сімдесят', 'вісімдесят', "дев'яносто"];
+  const HUNDREDS = ['', 'сто', 'двісті', 'триста', 'чотириста', "п'ятсот", 'шістсот', 'сімсот', 'вісімсот', "дев'ятсот"];
+  const triad = (n, fem) => {
+    const out = [HUNDREDS[Math.floor(n / 100)]];
+    const r = n % 100;
+    if (r >= 10 && r < 20) out.push(TEENS[r - 10]);
+    else out.push(TENS[Math.floor(r / 10)], (fem ? ONES_F : ONES_M)[r % 10]);
+    return out.filter(Boolean).join(' ');
+  };
+  const total = Math.round(num(amount) * 100);
+  let uah = Math.floor(total / 100);
+  const kop = total % 100;
+  const parts = [];
+  for (const [size, fem, names] of [[1e9, false, ['мільярд', 'мільярди', 'мільярдів']], [1e6, false, ['мільйон', 'мільйони', 'мільйонів']], [1e3, true, ['тисяча', 'тисячі', 'тисяч']]]) {
+    const n = Math.floor(uah / size);
+    if (n) parts.push(triad(n, fem), plural(n, ...names));
+    uah %= size;
+  }
+  if (uah) parts.push(triad(uah, true));
+  const whole = Math.floor(total / 100);
+  return `${parts.join(' ') || 'нуль'} ${plural(whole, 'гривня', 'гривні', 'гривень')}, ${String(kop).padStart(2, '0')} ${plural(kop, 'копійка', 'копійки', 'копійок')}`;
+}
+// «100 000 (сто тисяч гривень, 00 копійок) гривень» — як у зразку.
+const moneyFull = v => `${fmtNum(v)} (${moneyWords(v)}) ${plural(Math.floor(num(v)), 'гривня', 'гривні', 'гривень')}`;
+
+// Номер нового договору — наступний за найбільшим уже виданим.
+function nextContractNumber(p) {
+  const used = state.projects.filter(x => x !== p).map(x => parseInt(x.contract?.number, 10)).filter(Number.isFinite);
+  return used.length ? String(Math.max(...used) + 1) : String(p.number);
+}
+
+function contractTerms(p) {
+  const c = p.contract;
+  const its = p.offer.items;
+  const maxOf = k => Math.max(0, ...its.map(it => num(it[k])));
+  const total = kpSum(p);
+  const pay1 = c.pay1 === '' || c.pay1 == null ? Math.round(total / 2 / 1000) * 1000 : num(c.pay1);
+  const pay2 = num(c.pay2);
+  return {
+    number: c.number || nextContractNumber(p), date: c.date || localDate(),
+    days: num(c.days) || maxOf('days') || 40, warranty: maxOf('warranty') || 24,
+    total, pay1, pay2, rest: Math.round((total - pay1 - pay2) * 100) / 100,
+  };
+}
+
+TAB_VIEWS.contract = p => {
+  const c = p.contract, t = contractTerms(p), s = state.settings;
+  const C = (k, label, attrs = '') => `<label class="field"><span>${label}</span><input data-action="dg" data-k="${k}" value="${esc(c[k] ?? '')}" ${attrs}></label>`;
+  const F = (field, label, attrs = '') => `<label class="field"><span>${label}</span><input data-field="${field}" value="${esc(p[field] ?? '')}" ${attrs}></label>`;
+  const warn = [
+    !p.offer.items.length && `немає виробів у <a href="#/project/${p.id}/offer">КП</a> — специфікація, суми й візуалізація беруться звідти`,
+    !s.companyName && 'не заповнено «Виконавець» у <a href="#/settings">Налаштуваннях</a>',
+    !s.details && 'немає реквізитів виконавця у <a href="#/settings">Налаштуваннях</a>',
+    !p.client && 'не вказано ПІБ замовника',
+    t.rest < 0 && 'платежі більші за вартість — залишок від\'ємний',
+  ].filter(Boolean);
+  return `
+    ${warn.length ? `<div class="card warn-card small">⚠ ${warn.join('; ')}.</div>` : ''}
     <div class="grid-side">
       <div>
-        <div class="card" id="est-mat">${estMatHtml(p)}</div>
         <div class="card">
-          <div class="card-head"><h3>Роботи та послуги</h3><div class="spacer"></div><button class="btn small" data-action="work-add">+ Робота</button></div>
-          ${e.works.map(w => `
-            <div class="work-row" data-wid="${w.id}">
-              <input data-action="work" data-k="name" value="${esc(w.name)}" placeholder="Назва роботи">
-              <input class="r" type="number" step="any" data-action="work" data-k="amount" value="${esc(w.amount)}" placeholder="0">
-              <span class="muted small">грн</span>
-              <button class="icon-btn" data-action="work-del" title="Видалити">✕</button>
-            </div>`).join('') || '<div class="muted">Немає</div>'}
+          <h3>Договір</h3>
+          <div class="form-grid">
+            ${C('number', 'Номер договору', `placeholder="${esc(t.number)}"`)}
+            <label class="field"><span>Дата договору</span><input type="date" data-action="dg" data-k="date" value="${esc(c.date || localDate())}"></label>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Замовник</h3>
+          <div class="form-grid">
+            ${F('client', 'ПІБ замовника', 'list="clients-list" autocomplete="off"')}
+            ${C('clientDoc', 'ІПН замовника')}
+            ${F('address', 'Адреса')}
+            ${F('phone', 'Телефон', 'type="tel"')}
+          </div>
+        </div>
+        <div class="card">
+          <h3>Оплата й строки (Додаток № 1)</h3>
+          <div class="form-grid">
+            ${C('pay1', 'Передплата, грн', `type="number" step="any" placeholder="${t.pay1}"`)}
+            ${C('pay2', 'Другий платіж у день доставки, грн (0 — без нього)', 'type="number" step="any"')}
+            ${C('days', 'Виготовити й доставити за, робочих днів', `type="number" placeholder="${t.days}"`)}
+          </div>
+          <p class="muted small" style="margin-bottom:0">Залишок — у день завершення монтажу — рахується сам. Гарантія в специфікації — з КП.</p>
         </div>
       </div>
       <div class="side">
-        <div class="card">
-          <h3>Параметри</h3>
-          <div class="form-grid">
-            ${E('markup', 'Націнка на матеріали, %')}
-            ${E('discount', 'Знижка, грн')}
-            ${E('advancePct', 'Аванс, %')}
-            ${E('validDays', 'Пропозиція дійсна, днів', '1')}
-          </div>
-        </div>
-        <div class="card" id="est-summary">${estSummaryHtml(p)}</div>
+        <div class="card" id="dg-sum">${contractSumHtml(p)}</div>
         <div class="card stack">
-          <button class="btn primary" data-action="est-print">🖨 Комерційна пропозиція (PDF)</button>
-          <button class="btn" data-action="est-budget">Записати суму в бюджет проєкту</button>
-          <span class="muted small">Ваші реквізити для документів заповнюються в «Налаштуваннях».</span>
+          <button class="btn primary" data-action="dg-print" ${p.offer.items.length ? '' : 'disabled'}>🖨 Договір (PDF)</button>
+          <span class="muted small">Договір + Додаток № 1 (специфікація з КП), № 2 (візуалізація — картинки з КП), № 3 (матеріали й фурнітура з КП, артикули — з рахунків).</span>
         </div>
       </div>
     </div>`;
 };
 
-function printOffer(p) {
-  const c = estimate(p), e = p.estimate, s = state.settings;
-  let n = 0;
-  const rows = [
-    ...Object.entries(c.byCat).map(([cat, sum]) => [cat, sum * c.k]),
-    ...e.works.filter(w => num(w.amount)).map(w => [w.name, num(w.amount)]),
-  ];
-  printDoc(`Комерційна пропозиція — ${p.name}`, `
-    <h1>Комерційна пропозиція</h1>
-    <div class="doc-meta">№${p.number} від ${fmtDate(localDate())}</div>
-    ${partiesHtml(p)}
-    <p>Виріб: <b>${esc([p.furnitureType, p.name].filter(Boolean).join(' — '))}</b>${p.address ? `<br>Адреса об'єкта: ${esc(p.address)}` : ''}</p>
-    <table class="doc-table">
-      <thead><tr><th>№</th><th>Найменування</th><th class="r">Сума, грн</th></tr></thead>
-      <tbody>
-        ${rows.map(([name, sum]) => `<tr><td>${++n}</td><td>${esc(name)}</td><td class="r">${fmtNum(sum)}</td></tr>`).join('')}
-        ${c.discount ? `<tr><td></td><td class="r">Разом</td><td class="r">${fmtNum(c.subtotal)}</td></tr><tr><td></td><td class="r">Знижка</td><td class="r">− ${fmtNum(c.discount)}</td></tr>` : ''}
-        <tr class="doc-total"><td></td><td class="r">До сплати</td><td class="r">${fmtNum(c.total)}</td></tr>
-      </tbody>
-    </table>
-    <p>Аванс ${fmtNum(e.advancePct)}%: <b>${money(c.advance)}</b>, решта — після монтажу.</p>
-    <p>Пропозиція дійсна ${fmtNum(e.validDays)} днів.</p>
-    <p class="doc-small">${nl2br(s.offerNote ?? DEFAULT_OFFER_NOTE)}</p>
-    <div class="doc-sign"><div>Виконавець ____________________ ${esc(s.companyName || '')}</div></div>`);
+function contractSumHtml(p) {
+  const t = contractTerms(p);
+  return `
+    <div class="kv"><span>Вартість (з КП)</span><b>${money(t.total)}</b></div>
+    <div class="kv"><span>Передплата</span><b>${money(t.pay1)}</b></div>
+    ${t.pay2 ? `<div class="kv"><span>У день доставки</span><b>${money(t.pay2)}</b></div>` : ''}
+    <div class="kv"><span>Залишок (у день монтажу)</span><b class="${t.rest < 0 ? 'warn-text' : ''}">${money(t.rest)}</b></div>
+    <div class="kv"><span>Строк</span><b>${fmtNum(t.days)} ${plural(t.days, 'робочий день', 'робочі дні', 'робочих днів')}</b></div>`;
+}
+
+// Абзаци договору: «Виконавець», «Замовник», «Меблі», «Монтажник» — жирним, як у зразку.
+const dgBold = html => html.replace(/(^|[\s(«"„])((?:Виконав|Замовник|Меблі|Меблів|Меблям|Меблями|Монтажник)[а-яіїєґ']*)/g, '$1<b>$2</b>');
+const dgP = (n, text) => `<div class="dg-p"><b>${n}</b><span>${dgBold(text)}</span></div>`;
+const dgH = text => `<h2 class="dg-h">${text}</h2>`;
+
+function printContract(p) {
+  if (!p.offer.items.length) return toast('Спершу додайте вироби в «КП» — з них специфікація, суми й візуалізація', true);
+  const c = p.contract, t = contractTerms(p), s = state.settings;
+  const fop = String(s.companyName || '').replace(/^\s*ФОП\s+/i, '').trim() || '____________________';
+  const client = p.client ? esc(p.client) : '____________________';
+  const ipn = c.clientDoc ? `, ІПН ${esc(c.clientDoc)}` : '';
+  const parties = (what) => `<b>ФІЗИЧНА ОСОБА ${client}</b>${ipn}, надалі іменується <b>Замовник, -</b> з однієї сторони, та <b>ФІЗИЧНА ОСОБА-ПІДПРИЄМЕЦЬ ${esc(fop)}</b>, який діє на підставі Виписки про державну реєстрацію, надалі іменується <b>Виконавець</b>, з другої сторони, надалі кожна окремо «Сторона», а разом – «Сторони», ${what}`;
+  const ref = `Договору на виготовлення меблів №${esc(t.number)} від ${dateWords(t.date, false)}`;
+  const annex = (n, title) => `<div class="dg-break"></div><div class="dg-annex">Додаток № ${n} до<br>${ref}.</div>${title ? `<h1 class="dg-title">${title}</h1>` : ''}`;
+  const requisites = `
+    <table class="dg-req">
+      <tr><th>Виконавець:</th><th>Замовник:</th></tr>
+      <tr><td>${esc(s.companyName || '')}${s.details ? '<br>' + nl2br(s.details) : ''}</td>
+        <td>${client}${c.clientDoc ? `<br>ІПН ${esc(c.clientDoc)}` : ''}${p.address ? `<br>Адреса: ${esc(p.address)}` : ''}${p.phone ? `<br>Тел (${esc(p.phone)})` : ''}</td></tr>
+      <tr class="dg-req-sign"><td></td><td></td></tr>
+    </table>`;
+  const plain = l => l.replace(/\*\*|\[\[|\]\]/g, '').trim();
+
+  // Додаток № 1 — меблі з КП
+  const rows = p.offer.items.map((it, i) => `<tr><td>${i + 1}</td><td><b>${esc(it.title || p.name)}</b></td><td></td><td>шт</td><td>${fmtNum(kpQty(it))}</td><td>${fmtNum(it.price)}</td><td>${fmtNum(kpTotal(it))}</td><td>${fmtNum(num(it.warranty) || t.warranty)} ${plural(num(it.warranty) || t.warranty, 'місяць', 'місяці', 'місяців')}</td></tr>`).join('');
+  const pays = [
+    ['Сума передплати', t.pay1, 'Замовник здійснює передплату у повній сумі в точці продажу (офісі) Виконавця одночасно із укладанням цього Договору або на розрахунковий рахунок Виконавця.'],
+    t.pay2 ? ['Другий платіж', t.pay2, 'Замовник оплачує в день доставки Меблів, шляхом передачі коштів представнику Виконавця, або на розрахунковий рахунок Виконавця.'] : null,
+    t.rest > 0 ? ['Залишок за договором', t.rest, 'Замовник оплачує залишок за договором в день завершення монтажу Меблів, шляхом передачі коштів представнику Виконавця, або на розрахунковий рахунок Виконавця.'] : null,
+  ].filter(Boolean);
+
+  // Додаток № 2 — картинки з КП
+  const visual = p.offer.items.map(it => {
+    const imgs = it.imageIds.map(id => p.files.find(f => f.id === id)).filter(Boolean);
+    // Назва виробу — разом із першою картинкою (не лишається сама внизу сторінки).
+    const img = f => `<img src="${fileUrl(p, f)}" alt="">`;
+    return imgs.length ? `<div class="dg-vis"><div class="dg-vis-head"><div class="dg-vis-title">${esc(it.title || p.name)}</div>${img(imgs[0])}</div>${imgs.slice(1).map(img).join('')}</div>` : '';
+  }).join('');
+
+  // Додаток № 3 — матеріали й фурнітура з КП; артикул — код товару з рахунків
+  const codes = new Map(supplierInvoices(p).flatMap(i => i.items || []).filter(it => it.code).map(it => [it.name.trim().toLowerCase(), it.code]));
+  const mats = [...new Set(p.offer.items.flatMap(it => it.list.map(plain)).filter(Boolean))];
+
+  const fileName = ['№' + t.number, fmtDate(t.date).replace(/\./g, '_'), 'Договір_меблі'].join('_').replace(/[\\/:*?"<>|]+/g, '-');
+  printDoc(fileName, `
+    <table class="dg-page"><thead><tr><td></td></tr></thead>
+    <tfoot><tr><td><div class="dg-foot"><span>Виконавець <i></i></span><span>Замовник <i></i></span></div></td></tr></tfoot>
+    <tbody><tr><td class="dg-doc">
+      <h1 class="dg-title">ДОГОВІР<br>№ ${esc(t.number)}</h1>
+      <div class="dg-place"><b>м. ${esc(s.city || 'Київ')}</b><b>${dateWords(t.date)}</b></div>
+      <p class="dg-intro">${parties('керуючись нормами чинного законодавства України уклали цей Договір, далі – «Договір», про наступне:')}</p>
+
+      ${dgH('ВИЗНАЧЕННЯ ТЕРМІНІВ')}
+      <p class="dg-def"><b>Збірка Меблів</b> – підготовка матеріалів та виготовлення модульних конструкцій безпосередньо на виробництві <b>Виконавця</b>.</p>
+      <p class="dg-def"><b>Монтаж Меблів</b> – встановлення та закріплення модулів <b>Меблів</b>, врізка, монтування техніки.</p>
+      <p class="dg-def"><b>Контрольний замір</b> – необхідні заміри приміщення, в якому буде проводитись монтаж <b>Меблів</b>, на підставі яких відбувається конструювання <b>Меблів</b>.</p>
+      <p class="dg-def"><b>Монтажник</b> – уповноважений працівник <b>Виконавця</b>, що здійснює монтаж <b>Меблів</b>.</p>
+
+      ${dgH('1. ПРЕДМЕТ ДОГОВОРУ')}
+      ${dgP('1.1.', 'Виконавець зобов’язується надати за завданням Замовника послуги з виготовлення та монтажу меблів (далі – Меблі) і передати їх Замовнику, а Замовник відповідно до умов цього Договору зобов’язується прийняти та оплатити за такі Меблі.')}
+      ${dgP('1.2.', 'Вид Меблів, кількість, комплексність, комплектація, матеріал, узгоджуються Сторонами в Дизайн-проекті Меблів замовника.')}
+
+      ${dgH('2. ТЕРМІНИ ВИГОТОВЛЕННЯ, ПОРЯДОК ДОСТАВКИ, ВСТАНОВЛЕННЯ')}
+      ${dgP('2.1.', 'Фактична дата виготовлення та доставка Меблів погоджується із Замовником в Додатку № 1.')}
+      ${dgP('2.2.', 'Перед настанням терміну доставки і монтажу Меблів, Виконавець повідомляє Замовника про готовність і уточнює час і дату доставки. Замовник, у разі зміни часу доставки, не менше ніж за 24 години повинен повідомити про це Виконавця і узгодити з ним новий час.')}
+      ${dgP('2.3.', 'У разі, якщо з незалежних від Виконавця причин (несвоєчасне постачання матеріалів постачальником та інші обставини, які не залежать від сили та волі Виконавця), останній не вкладається в установлений термін, він має право перенести строк виконання замовлення до 30 робочих днів за згодою Сторін.')}
+      ${dgP('2.4.', 'Претензії щодо візуально-видимих недоліків Меблів, після підписання Замовником акту приймання-передачі виконаних робіт, не приймаються. У разі виявлення дефекту Меблів або його некомплектності, Замовник спільно з представником Виконавця здійснюють відповідний запис в акті прийому-передачі виконаних Меблів та погоджують порядок і терміни усунення виявлених недоліків.')}
+      ${dgP('2.5.', 'По завершенню монтажу Меблів, Замовник (або його довірена особа), зобов’язаний перевірити та прийняти Меблі за якістю, комплектністю і кількістю та підписати Акт прийому-передачі виконаних робіт.')}
+      ${dgP('2.6.', 'Якщо протягом 5 (п’яти) календарних днів після отримання Акту прийому-передачі виконаних робіт Замовник не висуває письмової претензії до наданих послуг, такий Акт прийому-передачі виконаних робіт вважається погоджений та підписаний між Сторонами.')}
+
+      ${dgH('3. ВАРТІСТЬ ДОГОВОРУ І ПОРЯДОК РОЗРАХУНКІВ')}
+      ${dgP('3.1.', 'Загальна сума Договору складається з сум усіх Актів приймання-передачі виконаних робіт за період дії цього Договору. Вартість послуг встановлюється в національній валюті України – гривня. Вартість Меблів та черговість оплати зазначаються у Додатку № 1 до даного Договору. Зазначена в Додатку № 1 ціна вважається чинною протягом 60 (шістдесяти) календарних днів з моменту його підписання, не є остаточною згідно технічного завдання і може бути змінена.')}
+      ${dgP('3.2.', 'У разі порушення Замовником терміну оплати, Виконавець вправі зупинити подальше надання послуг з виготовлення меблів, до моменту повного погашення Замовником заборгованості згідно умов Додатку № 1.')}
+      ${dgP('3.3.', 'Додаткові платежі, необхідність в яких може виникнути при виконанні цього Договору, підлягають відшкодуванню Замовником окремо, за умови якщо їх підтверджено документально. Документальним підтвердженням вважається наданий Виконавцем лист-розрахунок про додаткові платежі.')}
+      ${dgP('3.4.', 'Вартість доставки та монтажу включено в ціну Меблів.')}
+      ${dgP('3.5.', 'Доставка Меблів до квартири (підйом на поверх) оплачується окремо, в тому випадку, якщо відсутній ліфт, або деталі не вміщаються в ліфт.')}
+      ${dgP('3.6.', 'Вартість послуг з підйому визначається в калькуляції і залежить від поверху і кількості підйомів та оплачується додатково, в день доставки Меблів .')}
+      ${dgP('3.7.', 'Підйом меблів в квартиру без ліфта - 40 грн. за поверх – один підйом, однією людиною, перший поверх не враховується.')}
+      ${dgP('3.8.', 'Підключення і гарантійне обслуговування вбудованої кухонної техніки здійснюються виробниками (дилерами виробників) або організаціями, що зазначені у гарантійних талонах (технічних паспортах, сервісних книжках) на цю техніку, які передаються Продавцем Покупцю разом з Товаром.')}
+      ${dgP('3.9.', 'Підключення сантехнічних виробів та прокладення сантехнічних мереж (водопостачання, водовідведення) Виконавцем не здійснюється.')}
+      ${dgP('3.10.', 'Техніка, що стоїть чи висить окремо (холодильник, витяжка, і т.д.) встановлюється силами Замовника, або за окрему плату Виконавцем, вартість якої залежить від складності установки.')}
+      ${dgP('3.11.', 'Вартість вищезазначених додаткових послуг не є частиною цього договору, не входить в зобов’язання за цим Договором і оплачується Замовником окремо, за їх фактом виконання.')}
+
+      ${dgH('4. ПРАВА ТА ОБОВ’ЯЗКИ СТОРІН')}
+      <div class="dg-p"><b>4.1.</b><span><b>Права та обов’язки Виконавця:</b></span></div>
+      ${dgP('4.1.1.', 'Виконавець зобов\'язаний передати Замовнику Меблі належної якості, які відповідають технічним кресленням, складеним на підставі контрольного заміру, погодженим з Замовником, та комплектації, описаній в Специфікації, у строк, зазначений у Додатку № 1.')}
+      ${dgP('4.1.2.', 'Виконавець зобов\'язаний усунути визнані ним недоліки Меблів, виявлені в процесі приймання Меблів Замовником, у термін не більше 45 (сорока п’яти) календарних днів з дня винесення висновку щодо претензії Замовника.')}
+      ${dgP('4.1.3.', 'Виконавець має право, встановлювати і вносити зміни в технічні особливості і конструктив Меблів, які не впливають істотно на його зовнішній вигляд і вартість, за згодою сторін (наприклад: фальш-панелі, відступи, технологічні розміри і т.д.).')}
+      ${dgP('4.1.4.', 'Перевірка якості виконання ремонту приміщення Замовника не входить в зобов\'язання Виконавця в особі Монтажника або іншого представника Виконавця.')}
+      ${dgP('4.1.5.', 'Виконавець має право здійснювати фото- та/або відео-зйомку вже змонтованих Меблів з подальшим використанням отриманих фото- та/або відеоматеріалів в рекламних цілях на власний розсуд. Авторські права на отримані в процесі зйомки матеріали належать Виконавцю.')}
+      ${dgP('4.1.6.', 'Виконавець зобов’язується надати Замовнику конструкторське креслення Меблів (надалі за текстом – креслення), за вимогою Замовника виготовити та надати зразки Меблів на погодження Замовнику. Замовник зобов’язується погодити дане креслення та передані зразки Меблів протягом 4 (чотирьох) робочих днів від дати отримання. У разі збільшення строків погодження між Сторонами, термін виготовлення та доставки Меблів збільшується пропорційно кількість днів.')}
+      <div class="dg-p"><b>4.2.</b><span><b>Права та обов’язки Замовника:</b></span></div>
+      ${dgP('4.2.1.', 'Замовник зобов\'язаний забезпечити можливість доставки і установки Меблів у строк, що зазначений у Додатку № 2. При неготовності приміщення Замовника до монтажу Меблів в зазначений термін (<i>не здійснено вчасно ремонт приміщення тощо</i>), Замовник зобов\'язаний (до настання «фактичної готовності Меблів до доставки») оплатити 100% вартості Меблів (забезпечивши остаточну оплату залишку коштів у сумі, зазначену в Додатку № 2) і прийняти доставку Меблів за адресою установки, або за будь-якою іншою адресою, з подальшим транспортуванням Меблів власними силами, за власний рахунок і під особисту відповідальність Замовника. Монтаж Меблів, в такому випадку, буде здійснено за окрему додаткову плату та у додатково погоджені з Виконавцем строки.')}
+      ${dgP('4.2.2.', 'Замовник зобов\'язаний надати Виконавцю схему прихованих комунікацій (прихованої проводки, труб опалення і т.д.). У випадку не надання даної схеми, вся відповідальність за пошкодження прихованих комунікацій і наслідки їх пошкодження повністю покладається на Замовника. У деяких випадках, Виконавець, в особі Монтажника, має право відмовитися від робіт, пов\'язаних з ризиком пошкодження схованих комунікацій або наявного ремонту приміщення (пошкодження плитки, підлоги, стелі та ін.).')}
+      ${dgP('4.2.3.', 'У разі зміни конструювання приміщення після того, як Виконавцем було проведено контрольний замір, Замовник зобов’язується повідомити про це Виконавця. У разі неповідомлення про зміну конструювання приміщення, претензії, викликані наслідками недодержання даних вимог не приймаються. Переробка або підгонка Меблів, пов’язані з порушенням даних вимог, можуть бути здійснені лише за додаткову оплату.')}
+      ${dgP('4.2.4.', 'Перед проведенням монтажу Меблів, Замовник, щоб уникнути псуванню і забрудненню Меблів, зобов\'язаний вкрити меблі, підлогу, побутові прилади, прибрати зайві предмети, провести демонтаж старих меблів, провести відключення сантехніки.')}
+      ${dgP('4.2.5', 'Замовник зобов\'язаний виконати прийняття Меблів після його встановлення і підписати акт прийому-передачі виконаних робіт, згідно з порядком, встановленим цим Договором.')}
+      ${dgP('4.2.6.', 'У разі неможливості здійснення Виконавцем монтажу Меблів у день доставки через обставини, що не залежать від Виконавця (немає електроенергії, аварійна ситуація на об’єкті, немає доступу до місця встановлення Меблів та/або ін.), Замовник зобов\'язується забезпечити цілісність фабричної упаковки переданих йому Меблів та елементів, і передати їх монтажній бригаді в тому вигляді, в якому він їх отримав.')}
+      ${dgP('4.2.7.', 'У разі відмови Замовника від виконання Договору до передачі йому Меблів, Замовник зобов\'язаний сплатити Виконавцю частину встановленої цим Договором загальної вартості договору, пропорційно обсягу роботи, виконаної Виконавцем, з метою виконання цього Договору, включаючи прямі і непрямі витрати Виконавця.')}
+      ${dgP('4.2.8.', 'Замовник зобов\'язаний здійснити своєчасну оплату Меблів, згідно з умовами, описаними у Додатку № 1. При порушенні порядку та/або термінів оплати, Виконавець має право стягнути з Замовника неустойку у розмірі подвійної облікової ставки НБУ від загальної суми залишку згідно з Додатком № 1 за кожен день прострочення.')}
+      ${dgP('4.2.9.', 'У разі порушення Виконавцем строку виконання своїх зобов\'язань, передбачених пунктом 2 цього Договору з вини Виконавця, Замовник вправі стягнути з Виконавця неустойку, у розмірі 0,01% від загальної вартості недопоставлених Меблів за кожен день прострочки, але у будь-якому випадку не більше загальної вартості недопоставлених елементів Меблів.')}
+
+      ${dgH('5. ЯКІСТЬ МЕБЛІВ ТА ГАРАНТІЙНІ ОБОВ’ЯЗКИ')}
+      ${dgP('5.1.', 'Меблі, що доставляються в рамках цього Договору є корпусними. Окремі деталі Меблів мають гранично-допустимі відхилення в розмірах, які разом з вадами кривизни стін, можуть в результаті монтажу незначно змінити загальні габаритні розміри Меблів в більшу сторону. Враховуючи ці фактори, при проектуванні Меблів, затиснутих між двома стінами, робиться технічний відступ від другої стіни, розмір якого технолог вибирає самостійно, для безперешкодної установки Меблів в нішу. У випадку, якщо розмір цього відступу (щілини між стіною і крайнім корпусом Меблів) не перевищує 20 мм, щілина залишається незакритою. У разі якщо Замовник, при підписанні договору зафіксував у специфікації бажання виготовити Меблі від стіни до стіни, Виконавець проектує Меблі таким чином, щоб між стіною і крайнім ящиком Меблів залишився отвір не менше 50 мм. Цей отвір закривається фальш-фасадом, який підпилюється в розмір за місцем установки.')}
+      <div class="dg-p"><b>5.2</b><span><b>Гарантія:</b></span></div>
+      ${dgP('5.2.1.', 'Загальні умови:<br>– Гарантійний ремонт Меблів здійснюється тільки при наявності акту приймання-передачі Меблів за даним Договором та Чеку;<br>– Гарантія передбачає виконання ремонтних робіт Меблів та/або окремих їх частин та/або механізмів, якщо пошкодження виникли з вини Виконавця.')}
+      ${dgP('5.2.2.', 'На виготовлені Меблі, а також на фурнітуру, Виконавець встановлює гарантійний термін в Додатку № 1. Термін обчислюється з моменту підписання Замовником акту приймання-передачі Меблів.')}
+      ${dgP('5.3.', 'Гарантія не поширюється на Меблі у разі їх самостійної установки Замовником або установки із залученням третьої сторони.')}
+      ${dgP('5.4.', 'Безкоштовному гарантійному обслуговуванню не підлягають: скло, дзеркала, ламкі деталі (маркуються етикетками «Обережно»). Кількість та цілісність вищевказаних елементів Замовник зобов’язаний перевірити спільно із Виконавцем (або з Монтажником).')}
+      ${dgP('5.5.', 'Меблі знімаються з гарантії у випадку їх пошкодження або окремих їх частин та/або механізмів в результаті:')}
+      <ul class="dg-dash">${['стороннього втручання або спроби самостійного ремонту;', 'несанкціонованих змін конструкції та/або схем виробу, не передбачених даним Договором;', 'механічних пошкоджень або впливу занадто великого навантаження;', 'механічних пошкоджень через використання окремих частин Меблів не за цільовим призначенням;', 'підвищеної вологість більше 80%;', 'підвищеної температури більше 40 градусів;', 'пониженої температури менше 0 градусів;', 'прямого впливу сонячного світла, дощу, снігу тощо;', 'багаторазових циклів заморозки, розморожування (більше 3-х);', 'прямого впливу пару та води;', 'прямого впливу хімічних речовин, кислот, лугу, розчинників та їх похідних;', 'якщо меблі піддавались механічному впливу.'].map(x => `<li>${dgBold(x)}</li>`).join('')}</ul>
+      <p class="dg-indent">У разі зняття Меблів з гарантії будь-які ремонтні роботи та/або регулювання механізмів Меблів здійснюється за окрему плату. Замовник зобов’язаний внести 100% передплату за ремонтні роботи до моменту виїзду монтажників на об’єкт для здійснення негарантійного ремонту.</p>
+      ${dgP('5.6.', 'Гарантійні зобов\'язання на побутову техніку або сантехнічне обладнання обмежуються строками, встановленими виробником даної техніки. У разі виникнення гарантійного випадку, пов\'язаного з побутовою технікою або сантехнічним обладнанням, що є частиною цього Договору Замовник зобов\'язується звертатися безпосередньо в офіційні сервіс–центри, адреси яких вказані на доданих до техніки гарантійних талонах. Будь які необхідні дії Замовника щодо гарантійного обслуговування побутової техніки та/або сантехнічного обладнання (перевезення до/від сервісного центру і т.п.) не є обов’язком Виконавця за цим договором та не можуть бути відшкодовані за рахунок Виконавця.')}
+
+      ${dgH('6. ОБСТАВИНИ НЕПЕРЕБОРНОЇ СИЛИ')}
+      ${dgP('6.1.', 'Сторона звільняється від відповідальності за повне або часткове невиконання/неналежне виконання умов цього Договору, якщо доведе, що таке порушення сталося внаслідок дії обставин непереборної сили та (або) випадку, за умови, що період їх дії був засвідчений у визначеному Договором порядку.')}
+      ${dgP('6.2.', 'Під непереборною силою маються на увазі: стихійні лиха (пожежі, повені, зсуви, землетруси тощо), воєнні дії, злочинні дії третіх осіб, епідемії, страйки, ембарго, бойкот, рішення та дії органів державної влади.')}
+      ${dgP('6.3.', 'Під «випадком» у Договорі маються на увазі: будь-які обставини, що не вважаються непереборною силою за Договором і які безпосередньо не обумовлені діяльністю Сторін та не пов’язані із ними причинним зв’язком, що виникають без вини Сторін, поза волею Сторін і які не можна за умови вжиття звичайних для цього заходів передбачити та відвернути (уникнути).')}
+      ${dgP('6.4.', 'Факт виникнення і припинення обставин непереборної сили підтверджується відповідним документом, виданим уповноваженим органом.')}
+      ${dgP('6.5.', 'Сторона, що постраждала від дії непереборної сили, повинна не пізніше 5 діб з моменту її виникнення, сповістити іншу Сторону про настання таких обставин.')}
+      ${dgP('6.6.', 'Настання обставин непереборної сили та (або) випадку не звільняє Сторону, для якої вони настали, від виконання своїх зобов’язань по Договору, а лише подовжує строки їх виконання на період дії таких обставин та (або) випадку.')}
+      ${dgP('6.7.', 'Якщо обставини непереборної сили та (або) випадок тривають більш як 60 (шістдесят) календарних днів, Сторона що не потрапила під дію таких обставин вправі розірвати Договір в односторонньому порядку, повідомивши про це іншу Сторону за десять днів до розірвання.')}
+      ${dgP('6.8.', 'Виникнення обставин непереборної сили та (або) випадку в момент прострочення виконання Стороною своїх зобов’язань за Договором позбавляє таку Сторону права посилатись на такі обставини як на підставу звільнення від відповідальності за Договором.')}
+
+      ${dgH('7. ЗАКЛЮЧНІ ПОЛОЖЕННЯ')}
+      ${dgP('7.1.', 'Договір набуває чинності з моменту його підписання і діє до повного виконання Сторонами своїх зобов\'язань. У всьому іншому, що не врегульовано умовами цього Договору, Сторони будуть керуватися чинним законодавством.')}
+      ${dgP('7.2.', 'Підписанням цього Договору Замовник підтверджує, що йому надана і зрозуміла повна інформація про споживчі властивості товару, особливості фасадів обраної моделі, технологічні особливості виготовлення, експлуатації та установки комплекту Меблів.')}
+      ${dgP('7.3.', 'Відповідальність за збереження Меблів переходить до Замовника з моменту доставки Меблів або його елементів на адресу установки.')}
+      ${dgP('7.4.', 'Право власності переходить Замовнику в момент повної оплати вартості Меблів (при оплаті залишку коштів у сумі, зазначеній у Додатку № 1).')}
+      ${dgP('7.5.', 'У разі відмови Замовника від умов даного Договору, або внесення додаткових змін в проект замовлення <u>на будь-якому етапі його виконання</u>, Замовник зобов’язується сплатити Виконавцю грошове відшкодування коштів у розмірі вартості придбаних Виконавцем, на момент відмови, матеріалів, або внесення додаткових конструктивних змін в проект замовлення та оплачених на момент відмови робіт (технолог, замірщик, логістика, зразки Меблів і т.д.) для виконання даного Договору. Виконавець зобов\'язаний повернути Замовникові кошти за вирахуванням вказаних у пункті 7.5 цього Договору сум.')}
+      ${dgP('7.6.', 'Усі суперечки та розбіжності, що не передбачені умовами даного договору та/або які можуть виникнути в ході виконання цього договору, вирішуються шляхом переговорів/усних домовленостей між Сторонами. У разі неможливості врегулювати спірне питання шляхом переговорів/усних домовленостей спір передається на розгляд суду в порядку, передбаченому чинним законодавством.')}
+      ${dgP('7.7.', 'Копії документів, отримані електронною поштою та/або через будь-які месенджери або мобільні додатки (в тому числі, але не обмежуючись, через Telegram, Signal, Viber, WhatsApp) за номерами телефонів, вказаними у реквізитах Сторін цього Договору, мають юридичну силу до моменту обміну оригіналами, що має бути здійснений протягом 10 (десяти) робочих днів з моменту направлення копій документів.')}
+      ${dgP('7.8.', 'Уся інша переписка, здійснена за допомогою будь-якого з вказаних у цьому пункті способів, та не оформлена у документарному вигляді, має юридичну силу та визнається Сторонами належною. Договір складений у двох примірниках, які мають однакову юридичну силу при умові підписання обома Сторонами, по одному екземпляру для кожної зі Сторін.')}
+      <p class="dg-annexes"><b>До Договору додаються:</b></p>
+      <ol class="dg-list"><li>Додаток № 1 – Специфікація;</li><li>Додаток №2- Візуалізація;</li>${mats.length ? '<li>Додаток № 3 – Специфікація використаних матеріалів і фурнітури.</li>' : ''}</ol>
+      ${requisites}
+
+      ${annex(1, 'СПЕЦИФІКАЦІЯ № 1')}
+      <p class="dg-intro">${parties(`уклали цю Специфікацію до ${ref} (далі – Договір), про наступне:`)}</p>
+      ${dgH('1. НАЙМЕНУВАННЯ, КІЛЬКІСТЬ ТА ВАРТІСТЬ МЕБЛІВ')}
+      ${dgP('1.1.', 'Виконавець за даною Специфікацією до Договору передає у власність Замовника наступні Меблі:')}
+      <table class="dg-spec">
+        <thead><tr><th>№ п/п</th><th>Найменування Меблів (номенклатура)</th><th>Розміри Меблів</th><th>Одиниця виміру</th><th>Кількість</th><th>Ціна за одиницю без ПДВ, грн</th><th>Всього без ПДВ, грн</th><th>Гарантійний строк на Меблі</th></tr></thead>
+        <tbody>${rows}<tr class="dg-spec-total"><td colspan="7">Всього сума без ПДВ грн.</td><td>${fmtNum(t.total)}</td></tr></tbody>
+      </table>
+      ${dgH('2. ПОРЯДОК РОЗРАХУНКІВ')}
+      <div class="dg-p"><b>2.1.</b><span><b>Черговість та порядок оплати</b></span></div>
+      ${pays.map(([label, sum, text], i) => `<div class="dg-p"><b>2.1.${i + 1}.</b><span><b>${label}: ${moneyFull(sum)}</b>.</span></div><p class="dg-plain">${text}</p>`).join('')}
+      ${dgH('3. СТРОКИ ВИГОТОВЛЕННЯ МЕБЛІВ ТА ЇХ ДОСТАВКА')}
+      ${dgP('3.1.', `Виконавець зобов’язується виготовити та доставити Меблі протягом ${fmtNum(t.days)} ${plural(t.days, 'робочого дня', 'робочих днів', 'робочих днів')} з моменту повної передоплати.`)}
+      ${requisites}
+
+      ${visual ? annex(2, '') + visual + requisites : ''}
+
+      ${mats.length ? `${annex(3, 'СПЕЦИФІКАЦІЯ ВИКОРИСТАНИХ МАТЕРІАЛІВ І ФУРНІТУРИ')}
+      <table class="dg-mats">
+        <thead><tr><th>№</th><th>Найменування</th><th>Артикул</th><th>Опис</th></tr></thead>
+        <tbody>${mats.map((m, i) => `<tr><td>${i + 1}</td><td>${esc(m)}</td><td>${esc(codes.get(m.toLowerCase()) || '')}</td><td></td></tr>`).join('')}</tbody>
+      </table>
+      ${requisites}` : ''}
+    </td></tr></tbody></table>`);
+}
+
+function readLogo(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, 800 / Math.max(img.naturalWidth || 800, img.naturalHeight || 800));
+      const c = document.createElement('canvas');
+      c.width = Math.round((img.naturalWidth || 800) * k);
+      c.height = Math.round((img.naturalHeight || 800) * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/png'));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Не вдалося прочитати зображення')); };
+    img.src = url;
+  });
 }
 
 // --- Файли
@@ -1355,83 +1745,149 @@ TAB_VIEWS.invoices = p => {
   const stat = (label, value, cls = '') => `<div class="stat ${cls}"><div class="muted small">${label}</div><div class="stat-v">${value}</div></div>`;
   return `
     <div class="stats">
-      ${stat('Виставлено клієнту', money(f.order))}
-      ${stat('Оплачено клієнтом', money(f.paid), 'ok')}
-      ${stat('Залишок до оплати', money(f.due), f.due > 0 ? 'warn' : '')}
-      ${stat('Витрати постачальникам', money(f.costs))}
-      ${stat('Різниця (виставлено − витрати)', money(f.margin))}
+      ${stat('Рахунків', f.count)}
+      ${stat('Сума рахунків', money(f.costs))}
+      ${stat('Оплачено', money(f.paid), 'ok')}
+      ${stat('Не оплачено', money(f.due), f.due > 0 ? 'warn' : '')}
     </div>
-    ${invTable(p, 'client', 'Рахунки клієнту', '+ Рахунок клієнту')}
-    ${invTable(p, 'supplier', 'Рахунки від постачальників', '+ Рахунок постачальника')}`;
+    <div class="card upload">
+      <label class="drop" data-drop="invoices">
+        <input type="file" accept=".pdf,application/pdf,image/*" multiple data-action="inv-files" hidden>
+        <div><b>Перетягніть PDF рахунків постачальників сюди</b> або натисніть, щоб обрати — можна кілька одразу</div>
+        <div class="muted small">Номер, дату, суму, постачальника й позиції програма прочитає з PDF сама. PDF зберігається при рахунку.</div>
+      </label>
+    </div>
+    ${invTable(p)}`;
 };
 
-function invTable(p, kind, title, addLabel) {
-  const items = p.invoices.filter(i => i.kind === kind).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+// Версія розбору PDF: коли її піднято, рахунки, яких не правили вручну, перечитуються.
+const PARSE_V = 3; // 3 — код товару в позиціях (артикул у договорі)
+
+// Що прочитано з PDF → у рахунок. Виправлений вручну (✎) не перезаписуємо; оплату — ніколи.
+function applyParsed(i, r) {
+  if (!i.manual) {
+    Object.assign(i, {
+      number: r.number || i.number || '', date: r.date || i.date || '', ready: r.ready || '',
+      amount: r.amount || num(i.amount), counterparty: r.counterparty || i.counterparty || '',
+      description: r.title || i.description || '', items: r.items?.length ? r.items : i.items || [],
+    });
+  }
+  i.check = !num(i.amount) || !i.number || !i.counterparty;
+  i.parsed = true;
+  i.parseV = PARSE_V;
+}
+
+// PDF рахунків → файли в «Рахунки» й рядки таблиці; що прочитати не вдалося — позначено «перевірте».
+async function uploadInvoices(fileList) {
+  const p = state.current;
+  const files = [...fileList];
+  if (!p || !files.length) return;
+  let added = 0, unsure = 0;
+  try {
+    for (const [n, f] of files.entries()) {
+      toast(`Рахунок ${n + 1}/${files.length}: ${f.name}`);
+      const up = await request('POST', `/api/projects/${p.id}/files?name=${encodeURIComponent(f.name)}&category=${encodeURIComponent('Рахунки')}`, f, true);
+      p.files = up.files;
+      const r = await request('GET', `/api/projects/${p.id}/files/${up.file.id}/invoice`);
+      const i = { id: uid(), kind: 'supplier', number: '', date: '', counterparty: '', description: '', amount: 0, paid: 0, fileId: up.file.id, items: [] };
+      applyParsed(i, r);
+      if (!i.date) i.date = localDate();
+      p.invoices.push(i);
+      if (i.counterparty) await rememberContact('supplier', i.counterparty);
+      added++;
+      if (i.check) unsure++;
+    }
+  } catch (e) {
+    toast('Помилка: ' + e.message, true);
+  }
+  await saveNow(p);
+  if (state.current === p && state.tab === 'invoices') refreshTab();
+  if (added) toast(`Додано рахунків: ${added}${unsure ? ` (перевірте: ${unsure})` : ''}`);
+}
+
+// Рахунки, завантажені раніше (без позицій із PDF), — дочитуємо один раз, коли відкрили вкладку.
+async function backfillInvoices(p) {
+  const todo = supplierInvoices(p).filter(i => i.fileId && !i.manual && (i.parseV || 0) < PARSE_V && p.files.some(f => f.id === i.fileId && f.ext === '.pdf'));
+  if (!todo.length) return;
+  for (const i of todo) {
+    try { applyParsed(i, await request('GET', `/api/projects/${p.id}/files/${i.fileId}/invoice`)); } catch { i.parseV = PARSE_V; }
+  }
+  await saveNow(p);
+  if (state.current === p && state.tab === 'invoices') refreshTab();
+}
+
+function invTable(p) {
+  const items = supplierInvoices(p).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
   const files = Object.fromEntries(p.files.map(f => [f.id, f]));
   return `
     <div class="card">
-      <div class="card-head"><h3>${title}</h3><div class="spacer"></div><button class="btn small" data-action="inv-add" data-kind="${kind}">${addLabel}</button></div>
-      ${items.length ? `<div class="table-wrap"><table class="table compact">
-        <thead><tr><th>Дата</th><th>№</th><th>${kind === 'client' ? 'Опис' : 'Постачальник / опис'}</th><th class="r">Сума</th><th class="r">Оплачено</th><th>Статус</th><th>Файл</th><th></th></tr></thead>
+      <div class="card-head"><h3>Рахунки від постачальників</h3><div class="spacer"></div><button class="btn small" data-action="inv-add">+ Вручну</button></div>
+      ${items.length ? `<div class="table-wrap"><table class="table compact inv-table">
+        <thead><tr><th>Дата</th><th>№ рахунку</th><th>Готовність</th><th>Назва</th><th class="r">Сума</th><th class="r">Оплачено</th><th>Статус</th><th>PDF</th><th></th></tr></thead>
         <tbody>${items.map(i => {
           const st = invStatus(i);
           const file = i.fileId && files[i.fileId];
-          return `<tr data-iid="${i.id}">
-            <td>${fmtDate(i.date)}</td>
-            <td>${esc(i.number || '—')}</td>
-            <td>${i.counterparty ? `<div class="strong">${esc(i.counterparty)}</div>` : ''}<div class="small">${esc(i.description || '')}</div></td>
+          return `<tr data-iid="${i.id}" class="${i.check ? 'inv-check' : ''}">
+            <td class="nowrap">${fmtDate(i.date)}</td>
+            <td class="nowrap">${esc(i.number || '—')}</td>
+            <td class="nowrap">${i.ready ? `<span class="${i.ready < localDate() ? 'muted' : 'strong'}" title="Дата готовності замовлення">${fmtDate(i.ready)}</span>` : '<span class="muted">—</span>'}</td>
+            <td>
+              <div class="strong">${esc(i.counterparty || 'Постачальник?')}</div>
+              <div class="small">${esc(i.description || '')}</div>
+              ${i.items?.length ? `<details class="inv-items"><summary class="small muted">Позиції (${i.items.length})</summary>
+                <table class="table compact"><tbody>${i.items.map((it, k) => `<tr><td class="muted">${k + 1}</td><td>${esc(it.name)}</td><td class="r nowrap">${it.qty ? `${fmtNum(it.qty)} ${esc(it.unit || '')}` : ''}</td><td class="r nowrap">${money(it.sum)}</td></tr>`).join('')}</tbody></table>
+              </details>` : ''}
+              ${i.check ? '<div class="small warn-text">⚠ Не все прочиталося з PDF — перевірте (✎)</div>' : ''}</td>
             <td class="r nowrap">${money(i.amount)}</td>
             <td class="r nowrap">${money(i.paid)}</td>
-            <td><span class="pill ${st.cls}">${st.label}</span></td>
-            <td>${file ? `<a href="${fileUrl(p, file)}" target="_blank" title="${esc(file.name)}">📎</a>` : ''}</td>
-            <td class="nowrap"><button class="icon-btn" data-action="inv-edit">✎</button><button class="icon-btn" data-action="inv-del">✕</button></td>
+            <td><span class="pill ${st.cls}">${st.label}</span>${st.cls !== 'ok' && num(i.amount) ? `<br><button class="link-btn small" data-action="inv-paid">✓ оплачено</button>` : ''}</td>
+            <td>${file ? `<a class="btn small" href="${fileUrl(p, file)}" target="_blank" title="${esc(file.name)}">📄 Відкрити</a>` : '<span class="muted">—</span>'}</td>
+            <td class="nowrap"><button class="icon-btn" data-action="inv-edit" title="Редагувати">✎</button><button class="icon-btn" data-action="inv-del" title="Видалити">✕</button></td>
           </tr>`;
-        }).join('')}</tbody>
-      </table></div>` : '<div class="muted">Поки немає.</div>'}
+        }).join('')}
+          <tr class="total-row"><td colspan="4">Разом</td><td class="r nowrap">${money(items.reduce((a, i) => a + num(i.amount), 0))}</td><td class="r nowrap">${money(items.reduce((a, i) => a + num(i.paid), 0))}</td><td colspan="3"></td></tr>
+        </tbody>
+      </table></div>` : '<div class="muted">Поки немає — перетягніть PDF рахунків у поле вище.</div>'}
     </div>`;
 }
 
-function invoiceDialog(kind, inv) {
+function invoiceDialog(inv) {
   const p = state.current;
-  const i = inv || { kind, number: '', date: localDate(), counterparty: kind === 'client' ? p.client || '' : '', description: '', amount: '', paid: '', fileId: null };
+  const i = inv || { kind: 'supplier', number: '', date: localDate(), counterparty: '', description: '', amount: '', paid: '', fileId: null };
   const curFile = i.fileId && p.files.find(f => f.id === i.fileId);
   const form = openDialog({
-    title: inv ? 'Редагувати рахунок' : kind === 'client' ? 'Рахунок клієнту' : 'Рахунок від постачальника',
+    title: inv ? 'Редагувати рахунок' : 'Рахунок від постачальника',
     body: `
       <div class="row2">
-        <label class="field"><span>Тип</span><select name="kind">
-          <option value="client" ${i.kind === 'client' ? 'selected' : ''}>Клієнту</option>
-          <option value="supplier" ${i.kind === 'supplier' ? 'selected' : ''}>Від постачальника</option>
-        </select></label>
+        <label class="field"><span>Номер рахунку</span><input name="number" value="${esc(i.number)}"></label>
         <label class="field"><span>Дата</span><input type="date" name="date" value="${i.date || ''}"></label>
       </div>
       <div class="row2">
-        <label class="field"><span>Номер рахунку</span><input name="number" value="${esc(i.number)}"></label>
-        <label class="field"><span>Платник / постачальник</span><input name="counterparty" value="${esc(i.counterparty)}" list="${i.kind === 'client' ? 'clients-list' : 'suppliers-list'}" autocomplete="off"></label>
+        <label class="field"><span>Постачальник</span><input name="counterparty" value="${esc(i.counterparty)}" list="suppliers-list" autocomplete="off"></label>
+        <label class="field"><span>Дата готовності</span><input type="date" name="ready" value="${i.ready || ''}"></label>
       </div>
-      <label class="field"><span>Опис</span><input name="description" value="${esc(i.description)}" placeholder="Аванс, ДСП, фурнітура, стільниця…"></label>
+      <label class="field"><span>Назва (що в рахунку)</span><input name="description" value="${esc(i.description)}" placeholder="ДСП, кромка, порізка…"></label>
       <div class="row2">
         <label class="field"><span>Сума, грн</span><input type="number" step="0.01" name="amount" value="${esc(i.amount)}" required></label>
         <label class="field"><span>Оплачено, грн <button type="button" class="link-btn" data-fill-paid>= вся сума</button></span><input type="number" step="0.01" name="paid" value="${esc(i.paid)}"></label>
       </div>
-      <label class="field"><span>Файл рахунку ${curFile ? `(зараз: ${esc(curFile.name)})` : ''}</span><input type="file" name="file"></label>`,
+      <label class="field"><span>PDF рахунку ${curFile ? `(зараз: ${esc(curFile.name)})` : ''}</span><input type="file" name="file" accept=".pdf,application/pdf,image/*"></label>`,
     onSubmit: async form => {
       const d = Object.fromEntries(new FormData(form));
       let fileId = i.fileId || null;
       if (d.file && d.file.size) fileId = (await uploadFiles([d.file], 'Рахунки')).id;
       const data = {
-        kind: d.kind, number: d.number.trim(), date: d.date, counterparty: d.counterparty.trim(),
-        description: d.description.trim(), amount: num(d.amount), paid: num(d.paid), fileId,
+        kind: 'supplier', number: d.number.trim(), date: d.date, ready: d.ready, counterparty: d.counterparty.trim(),
+        description: d.description.trim(), amount: num(d.amount), paid: num(d.paid), fileId, check: false, manual: true,
       };
       if (inv) Object.assign(inv, data);
-      else p.invoices.push({ id: uid(), ...data });
+      else p.invoices.push({ id: uid(), items: [], parsed: true, ...data });
       await saveNow();
-      if (data.kind === 'supplier') await rememberContact('supplier', data.counterparty);
+      await rememberContact('supplier', data.counterparty);
       refreshTab();
     },
   });
   form.querySelector('[data-fill-paid]').onclick = () => (form.elements.paid.value = form.elements.amount.value);
-  form.elements.kind.onchange = () => form.elements.counterparty.setAttribute('list', form.elements.kind.value === 'client' ? 'clients-list' : 'suppliers-list');
 }
 
 // --- Здача проєкту
@@ -1464,7 +1920,7 @@ TAB_VIEWS.handover = p => {
         <div class="card stack">
           <button class="btn primary" data-action="act-print">🖨 Акт виконаних робіт (PDF)</button>
           ${!isArchived(p) ? '<button class="btn" data-action="close-project">✓ Закрити проєкт і перенести в архів</button>' : `<span class="muted small">Проєкт в архіві (${STATUS[p.status].label})</span>`}
-          <span class="muted small">Сума в акті береться з «Кошторису», а якщо він порожній — з рахунків клієнту.</span>
+          <span class="muted small">Роботи в акті — вироби з «КП», а якщо КП немає — бюджет проєкту з «Огляду».</span>
         </div>
       </div>
     </div>
@@ -1472,12 +1928,15 @@ TAB_VIEWS.handover = p => {
 };
 
 function printAct(p) {
-  const c = estimate(p), e = p.estimate, s = state.settings, h = p.handover;
-  const total = c.total || finance(p).order;
+  const s = state.settings, h = p.handover;
+  // Роботи — вироби з КП (кожен окремим рядком); КП немає — одним рядком на бюджет проєкту.
+  const items = p.offer.items.filter(it => kpTotal(it));
+  const total = items.length ? kpSum(p) : num(p.budget);
   const we = warrantyEnd(p);
   let n = 0;
-  const rows = [[`Виготовлення меблів: ${[p.furnitureType, p.name].filter(Boolean).join(' — ')}`, c.total ? c.materialsPrice : total]];
-  if (c.total) for (const w of e.works) if (num(w.amount)) rows.push([w.name, num(w.amount)]);
+  const rows = items.length
+    ? items.map(it => [`Виготовлення: ${it.title || p.name}${kpQty(it) > 1 ? ` (${fmtNum(kpQty(it))} шт)` : ''}`, kpTotal(it)])
+    : [[`Виготовлення меблів: ${[p.furnitureType, p.name].filter(Boolean).join(' — ')}`, total]];
   printDoc(`Акт — ${p.name}`, `
     <h1>Акт приймання-передачі виконаних робіт</h1>
     <div class="doc-meta">№${p.number} від ${fmtDate(h.date || localDate())}</div>
@@ -1488,7 +1947,6 @@ function printAct(p) {
       <thead><tr><th>№</th><th>Найменування робіт</th><th class="r">Сума, грн</th></tr></thead>
       <tbody>
         ${rows.map(([name, sum]) => `<tr><td>${++n}</td><td>${esc(name)}</td><td class="r">${fmtNum(sum)}</td></tr>`).join('')}
-        ${c.total && c.discount ? `<tr><td></td><td class="r">Знижка</td><td class="r">− ${fmtNum(c.discount)}</td></tr>` : ''}
         <tr class="doc-total"><td></td><td class="r">Разом</td><td class="r">${fmtNum(total)}</td></tr>
       </tbody>
     </table>
@@ -1555,8 +2013,18 @@ function viewSettings() {
         ${S('phone', 'Телефон', 'tel')}
         ${S('email', 'Email', 'email')}
         ${S('address', 'Адреса')}
-        <label class="field full"><span>Реквізити (IBAN, ІПН / ЄДРПОУ…)</span><textarea data-set="details" rows="2">${esc(s.details || '')}</textarea></label>
-        <label class="field full"><span>Умови в комерційній пропозиції</span><textarea data-set="offerNote" rows="3">${esc(s.offerNote ?? DEFAULT_OFFER_NOTE)}</textarea></label>
+        ${S('city', 'Місто (у договорі: «м. Київ»)')}
+        <label class="field full"><span>Реквізити виконавця для договору — кожне з нового рядка: адреса, ІПН, телефон, р/р, банк</span><textarea data-set="details" rows="2">${esc(s.details || '')}</textarea></label>
+        ${S('brand', 'Назва бренду для КП (напр. INOM)')}
+        ${S('instagram', 'Instagram')}
+        ${S('tagline', 'Підзаголовок на титулі КП')}
+        <div class="field"><span>Логотип для КП</span>
+          <div class="logo-row">
+            ${s.logo ? `<img class="logo-prev" src="${esc(s.logo)}" alt="">` : '<span class="muted small">Немає — буде назва бренду (з 4 літер — квадрат 2×2, як INOM)</span>'}
+            <label class="btn small">Обрати…<input type="file" accept="image/*" hidden data-action="logo-file"></label>
+            ${s.logo ? '<button class="btn small" data-action="logo-del">Прибрати</button>' : ''}
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1654,8 +2122,11 @@ app.addEventListener('click', async e => {
     if (a.startsWith('t-')) return await settingsAction(a, el);
 
     switch (a) {
-      case 'new-project': return newProjectDialog();
-      case 'filter': state.filter = el.dataset.v; return viewList(false);
+      case 'filter': state.filter = el.dataset.v; return viewList('');
+      case 'new-quote': return newProjectDialog(true);
+      case 'quote-accept':
+        changeStatus(p, FIRST_STATUS);
+        return toast(`«${p.name}» перенесено в «Проєкти»`);
       case 'notif-enable':
         await Notification.requestPermission();
         return renderReminderPanel();
@@ -1747,43 +2218,61 @@ app.addEventListener('click', async e => {
         return rerenderReminders();
       }
 
-      // матеріали
-      case 'mat-filter': state.matFilter = el.dataset.v; return renderTab();
-      case 'mat-add': {
-        const last = p.materials[p.materials.length - 1];
-        p.materials.push({ id: uid(), name: '', category: last?.category || MATERIAL_CATEGORIES[0], supplier: last?.supplier || '', qty: 1, unit: 'шт', price: 0, status: 'need' });
-        state.matFilter = 'all';
-        saveSoon();
+
+      // КП
+      case 'kp-add':
+        p.offer.items.push(newKpItem(p));
+        saveSoon(0);
         refreshTab();
-        return [...app.querySelectorAll('[data-k="name"]')].pop()?.focus();
-      }
-      case 'mat-del': {
-        const id = el.closest('[data-mid]').dataset.mid;
-        const m = p.materials.find(x => x.id === id);
-        if (m.name && !confirm(`Видалити «${m.name}»?`)) return;
-        p.materials = p.materials.filter(x => x.id !== id);
+        return [...app.querySelectorAll('.kp-item [data-k="title"]')].pop()?.focus();
+      case 'kp-del': {
+        const it = findKpItem(p, el);
+        if (!confirm(`Видалити «${it.title || 'виріб'}» з КП? (Зображення залишаться у «Файлах»)`)) return;
+        p.offer.items = p.offer.items.filter(x => x !== it);
         saveSoon(0);
         return refreshTab();
       }
-      case 'mat-copy': return copyOrderList(p);
-
-      // кошторис
-      case 'work-add':
-        p.estimate.works.push({ id: uid(), name: '', amount: 0 });
-        saveSoon();
-        renderTab();
-        return [...app.querySelectorAll('.work-row [data-k="name"]')].pop()?.focus();
-      case 'work-del':
-        p.estimate.works = p.estimate.works.filter(w => w.id !== el.closest('[data-wid]').dataset.wid);
+      case 'kp-up': case 'kp-down': {
+        const i = p.offer.items.indexOf(findKpItem(p, el));
+        swap(p.offer.items, i, a === 'kp-up' ? i - 1 : i + 1);
         saveSoon(0);
         return renderTab();
-      case 'est-print': return printOffer(p);
-      case 'est-budget': {
-        const total = estimate(p).total;
-        p.budget = String(Math.round(total * 100) / 100);
-        saveSoon(0);
-        return toast(`Бюджет проєкту: ${money(total)}`);
       }
+      case 'kp-img': {
+        const it = findKpItem(p, el), id = el.dataset.fid;
+        if (it.imageIds.includes(id)) it.imageIds = it.imageIds.filter(x => x !== id);
+        else if (it.imageIds.length >= KP_MAX_IMAGES) return toast(`Не більше ${KP_MAX_IMAGES} зображень на сторінку`, true);
+        else it.imageIds.push(id);
+        saveSoon(0);
+        renderTab();
+        return app.querySelector(`[data-kid="${it.id}"] [data-fid="${id}"]`)?.focus();
+      }
+      case 'kp-mats': {
+        const it = findKpItem(p, el);
+        const have = new Set(it.list.map(l => l.trim().toLowerCase()));
+        const add = invoiceGoods(p).filter(n => !have.has(n.toLowerCase()));
+        if (!add.length) return toast(invoiceGoods(p).length ? 'Усі позиції з рахунків уже в списку' : 'У рахунках ще немає позицій — завантажте PDF на вкладці «Рахунки»');
+        it.list = [...it.list.filter(l => l.trim()), ...add];
+        saveSoon(0);
+        return renderTab();
+      }
+      case 'kpl-add': return kpAddLine(findKpItem(p, el));
+      case 'kpl-del': case 'kpl-up': case 'kpl-down': {
+        const it = findKpItem(p, el), li = Number(el.closest('[data-li]').dataset.li);
+        if (a === 'kpl-del') {
+          it.list.splice(li, 1);
+          if (!it.list.length) it.list.push('');
+        } else swap(it.list, li, a === 'kpl-up' ? li - 1 : li + 1);
+        saveSoon(0);
+        return renderTab();
+      }
+      case 'kp-print': return await printKp(p);
+      case 'dg-print': return printContract(p);
+
+      case 'logo-del':
+        delete state.settings.logo;
+        saveSettingsSoon();
+        return viewSettings();
 
       // здача
       case 'act-print': return printAct(p);
@@ -1802,8 +2291,14 @@ app.addEventListener('click', async e => {
       }
 
       // рахунки
-      case 'inv-add': return invoiceDialog(el.dataset.kind);
-      case 'inv-edit': return invoiceDialog(null, p.invoices.find(i => i.id === el.closest('[data-iid]').dataset.iid));
+      case 'inv-add': return invoiceDialog();
+      case 'inv-paid': {
+        const i = p.invoices.find(x => x.id === el.closest('[data-iid]').dataset.iid);
+        i.paid = num(i.amount);
+        await saveNow();
+        return refreshTab();
+      }
+      case 'inv-edit': return invoiceDialog(p.invoices.find(i => i.id === el.closest('[data-iid]').dataset.iid));
       case 'inv-del': {
         const id = el.closest('[data-iid]').dataset.iid;
         if (!confirm('Видалити рахунок? (Прикріплений файл залишиться у «Файлах»)')) return;
@@ -1872,26 +2367,28 @@ app.addEventListener('input', e => {
     p.stages.find(s => s.id === el.closest('[data-sid]').dataset.sid).label = el.value;
     return saveSoon();
   }
-  if (a === 'mat' && el.tagName === 'INPUT') {
-    const row = el.closest('[data-mid]');
-    const m = p.materials.find(x => x.id === row.dataset.mid);
-    m[el.dataset.k] = el.value;
+  if (a === 'dg') {
+    p.contract[el.dataset.k] = el.value;
+    const box = $('#dg-sum');
+    if (box) box.innerHTML = contractSumHtml(p);
+    return saveSoon();
+  }
+  if (a === 'kp') {
+    p.offer[el.dataset.k] = el.value;
+    return saveSoon();
+  }
+  if (a === 'kpl') {
+    findKpItem(p, el).list[Number(el.closest('[data-li]').dataset.li)] = el.value;
+    return saveSoon();
+  }
+  if (a === 'kpi') {
+    const it = findKpItem(p, el);
+    it[el.dataset.k] = el.value;
     if (el.dataset.k === 'qty' || el.dataset.k === 'price') {
-      row.querySelector('.m-sum').textContent = money(matSum(m));
-      $('#mat-stats').innerHTML = matStatsHtml(p);
+      el.closest('[data-kid]').querySelector('.kp-sum b').textContent = kpSumText(it);
+      const t = $('#kp-total');
+      if (t) t.textContent = money(p.offer.items.reduce((s, x) => s + kpTotal(x), 0));
     }
-    return saveSoon();
-  }
-  if (a === 'est') {
-    p.estimate[el.dataset.k] = el.value;
-    $('#est-summary').innerHTML = estSummaryHtml(p);
-    if (el.dataset.k === 'markup') $('#est-mat').innerHTML = estMatHtml(p);
-    return saveSoon();
-  }
-  if (a === 'work') {
-    const w = p.estimate.works.find(x => x.id === el.closest('[data-wid]').dataset.wid);
-    w[el.dataset.k] = el.value;
-    $('#est-summary').innerHTML = estSummaryHtml(p);
     return saveSoon();
   }
 });
@@ -1907,7 +2404,16 @@ app.addEventListener('change', async e => {
       return;
     }
     if (a === 'status') return changeStatus(p, el.value);
+    if (a === 'logo-file') {
+      const f = el.files[0];
+      if (!f) return;
+      state.settings.logo = await readLogo(f);
+      saveSettingsSoon();
+      return viewSettings();
+    }
+    if (a === 'kp-upload') { const files = [...el.files]; el.value = ''; return await kpAddImages(p, findKpItem(p, el), files); }
     if (a === 'upload-cat') { state.uploadCategory = el.value; return; }
+    if (a === 'inv-files') { const files = [...el.files]; el.value = ''; return await uploadInvoices(files); }
     if (a === 'file-input') { await handleUpload(el.files, el.dataset.cat); el.value = ''; return; }
     if (a === 'file-cat') {
       const r = await request('PATCH', `/api/projects/${p.id}/files/${el.dataset.fid}`, { category: el.value });
@@ -1930,25 +2436,15 @@ app.addEventListener('change', async e => {
       saveSoon(0);
       return refreshTab();
     }
+    if (a === 'st-doneat') {
+      p.stages.find(x => x.id === el.closest('[data-sid]').dataset.sid).doneAt = el.value;
+      saveSoon(0);
+      return;
+    }
     if (a === 'st-plan') {
       p.stages.find(x => x.id === el.closest('[data-sid]').dataset.sid).plan = el.value;
       saveSoon(0);
       return renderTab();
-    }
-    if (a === 'mat') {
-      const row = el.closest('[data-mid]');
-      const m = p.materials.find(x => x.id === row.dataset.mid);
-      if (el.tagName === 'SELECT') {
-        m[el.dataset.k] = el.value;
-        if (el.dataset.k === 'status') {
-          el.className = 'pill-select ' + MAT_STATUS.find(x => x.key === m.status).cls;
-          $('#mat-stats').innerHTML = matStatsHtml(p);
-          renderTabs();
-        }
-        saveSoon(0);
-      } else if (el.dataset.k === 'supplier') {
-        await rememberContact('supplier', m.supplier);
-      }
     }
   } catch (err) {
     toast(err.message, true);
@@ -1960,6 +2456,10 @@ app.addEventListener('keydown', e => {
   const ref = e.target.dataset.ref;
   if (ref === 'log-text' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addLogFromInput(); }
   if (ref === 'rem-text') { e.preventDefault(); addReminderFromInput(); }
+  if (e.target.dataset.action === 'kpl' && state.current) {
+    e.preventDefault();
+    kpAddLine(findKpItem(state.current, e.target), Number(e.target.closest('[data-li]').dataset.li));
+  }
 });
 
 // перетягування: файли у зону завантаження, картки на дошці
@@ -1996,8 +2496,24 @@ window.addEventListener('drop', e => {
     return;
   }
   const d = e.target.closest?.('[data-drop]');
-  if (d) { d.classList.remove('over'); handleUpload(e.dataTransfer.files); }
-  else if (state.current && state.tab === 'files') handleUpload(e.dataTransfer.files);
+  if (d) d.classList.remove('over');
+  // На вкладці «Рахунки» файл, кинутий будь-куди, — рахунок; на «Файлах» — просто файл.
+  if (state.current && state.tab === 'invoices') uploadInvoices(e.dataTransfer.files);
+  else if (d || (state.current && state.tab === 'files')) handleUpload(e.dataTransfer.files);
+});
+
+// Ctrl+V на вкладці «КП» — знімок екрана йде у виріб, у якому зараз фокус (або в останній)
+document.addEventListener('paste', e => {
+  const p = state.current;
+  if (!p || state.tab !== 'offer') return;
+  const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
+  if (!files.length) return;
+  e.preventDefault();
+  const card = document.activeElement?.closest?.('[data-kid]');
+  let it = card && p.offer.items.find(x => x.id === card.dataset.kid);
+  if (!it) it = p.offer.items[p.offer.items.length - 1];
+  if (!it) p.offer.items.push((it = newKpItem(p)));
+  kpAddImages(p, it, files).catch(err => toast('Помилка завантаження: ' + err.message, true));
 });
 
 window.addEventListener('hashchange', route);
