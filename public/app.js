@@ -1566,17 +1566,22 @@ function imageRatios(p, ids) {
 function kpItemPage(p, it, ratios) {
   const imgs = it.imageIds.map(id => p.files.find(f => f.id === id)).filter(Boolean);
   const lines = it.list.map(l => l.trim()).filter(Boolean).map((l, i) => `${i + 1}. ${l}`);
-  while (lines.length < 4) lines.push('');
+  if (!lines.length) lines.push('');
   const q = kpQty(it);
   const rows = q > 1
     ? [[kpUnitLabel(it), money(it.price)], [`Загальна вартість (${fmtNum(q)} шт)`, money(kpTotal(it))]]
     : [['Вартість', money(it.price)]];
   if (num(it.days)) rows.push(['Термін виконання', `${fmtNum(it.days)} ${plural(it.days, 'робочий день', 'робочі дні', 'робочих днів')}`]);
   if (num(it.warranty)) rows.push(['Гарантія', `${fmtNum(it.warranty)} ${plural(it.warranty, 'місяць', 'місяці', 'місяців')}`]);
-  return `
+  const title = `<div class="kp-title">${esc(it.title || p.furnitureType || p.name)}</div>`;
+  // Аркуш з картинками (на всю сторінку), далі — окремий аркуш зі специфікацією і цінами (довгий список переходить на наступний).
+  return `${imgs.length ? `
     <section class="kp-page"><div class="kp-sheet">
-      <div class="kp-title">${esc(it.title || p.furnitureType || p.name)}</div>
+      ${title}
       <div class="kp-images" style="grid-template-columns: repeat(${kpColumns(imgs, ratios)}, 1fr)">${imgs.map(f => `<img src="${fileUrl(p, f)}" alt="">`).join('')}</div>
+    </div></section>` : ''}
+    <section class="kp-page flow"><div class="kp-sheet auto">
+      ${title}
       ${lines.map(l => `<div class="kp-row">${kpLine(l) || '&nbsp;'}</div>`).join('')}
       <div class="kp-prices">${rows.map(([k, v]) => `<div>${esc(k)}</div><div class="r"><b>${esc(v)}</b></div>`).join('')}</div>
     </div></section>`;

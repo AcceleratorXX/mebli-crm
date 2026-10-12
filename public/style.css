@@ -536,6 +536,10 @@ label.btn input[hidden] { display: none; }
 /* Висота з запасом: принтер (і «Microsoft Print to PDF») має свої неробочі поля по краях — точно в 297 мм воно не влазить і дає порожню сторінку. */
 .kp-page { page: kp; break-after: page; break-inside: avoid; box-sizing: border-box; height: 280mm; padding: 12mm 15mm 0; overflow: hidden; }
 .kp-page:last-child { break-after: auto; }
+/* Специфікація: висота за вмістом; довга — продовжується на наступному аркуші з тими ж полями */
+.kp-page.flow { height: auto; overflow: visible; break-inside: auto; -webkit-box-decoration-break: clone; box-decoration-break: clone; padding-bottom: 12mm; }
+.kp-title + .kp-row { border-top: 0; }
+.kp-page.flow .kp-row { break-inside: avoid; }
 .kp-cover-top { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 4mm; }
 .kp-logo-grid { width: 52mm; height: 52mm; border: 2px solid #000; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; font: 44pt/1 "Times New Roman", Georgia, serif; }
 .kp-logo-grid span { display: grid; place-items: center; }
