@@ -1196,9 +1196,17 @@ function ensureKpItem(it) {
     it.list = String(it.lines || '').split('\n').map(l => l.trim().replace(/^\d+\s*[.)]\s*/, '')).filter(Boolean);
     delete it.lines;
   }
+  // Прорахунок з Excel є, а список порожній — матеріали й фурнітура з таблиці (один раз; далі список ваш)
+  if (it.excel && !it.excel.listed) {
+    if (!it.list.some(l => l.trim())) it.list = excelGoods(it);
+    it.excel.listed = true;
+  }
   if (!it.list.length) it.list.push('');
   return it;
 }
+// Матеріали й фурнітура з прорахунку Excel (без послуг) + рядки без ціни на кшталт «Ручки 2 шт»
+const excelGoods = it => [...new Set([...(it.excel?.items || []).map(r => r.name.trim()).filter(n => n && !SERVICE.test(n)), ...(it.excel?.notes || [])])];
+const excelPrice = it => Math.round(num(it.excel?.cost) * (1 + num(state.settings.kpMarkup ?? 30) / 100) / kpQty(it));
 // Новий рядок після `after` (або в кінці) — і курсор у нього.
 function kpAddLine(it, after = it.list.length - 1) {
   it.list.splice(after + 1, 0, '');
@@ -1327,7 +1335,11 @@ async function importExcel(file, target) {
       for (const { it, gs } of batches) {
         const rows = gs.flatMap(g => g.rows);
         const cost = rows.reduce((a, r) => a + r.qty * r.price, 0);
-        it.excel = { file: file.name, cost: Math.round(cost * 100) / 100, items: rows.map(({ name, code, qty, unit, price }) => ({ name, code, qty, unit, price })) };
+        it.excel = {
+          file: file.name, cost: Math.round(cost * 100) / 100, listed: true,
+          items: rows.map(({ name, code, qty, unit, price }) => ({ name, code, qty, unit, price })),
+          notes: f.elements.notes?.checked ? gs.flatMap(g => g.sheet.notes) : [],
+        };
         if (f.elements.setPrice.checked) it.price = Math.round(cost * (1 + m / 100) / kpQty(it));
         if (f.elements.list.checked) {
           const have = new Set(it.list.map(l => l.trim().toLowerCase()));
@@ -1421,7 +1433,7 @@ function kpItemHtml(p, it, i, imgs) {
         ${I('warranty', 'Гарантія, місяців')}
         ${I('unitLabel', 'Текст рядка ціни за 1 шт, напр. «Вартість одного стола»', 'text')}
       </div>
-      <div class="kp-sum">${it.excel ? `<span class="muted small" title="${esc(it.excel.file)}">Собівартість за Excel: ${money(it.excel.cost)}${num(it.price) ? ` · націнка ${fmtNum(Math.round((kpTotal(it) / it.excel.cost - 1) * 100))}%` : ''}</span> · ` : ''}Вартість: <b>${kpSumText(it)}</b></div>
+      <div class="kp-sum">${it.excel ? `<span class="muted small" title="${esc(it.excel.file)}">Собівартість за Excel: ${money(it.excel.cost)}${num(it.price) ? ` · націнка ${fmtNum(Math.round((kpTotal(it) / it.excel.cost - 1) * 100))}%` : ` · <button class="link-btn" data-action="kp-xlsx-price">поставити ціну = собівартість + ${fmtNum(state.settings.kpMarkup ?? 30)}%</button>`}</span> · ` : ''}Вартість: <b>${kpSumText(it)}</b></div>
     </div>`;
 }
 
@@ -2418,6 +2430,12 @@ app.addEventListener('click', async e => {
         saveSoon(0);
         renderTab();
         return app.querySelector(`[data-kid="${it.id}"] [data-fid="${id}"]`)?.focus();
+      }
+      case 'kp-xlsx-price': {
+        const it = findKpItem(p, el);
+        it.price = excelPrice(it);
+        saveSoon(0);
+        return renderTab();
       }
       case 'kp-mats': {
         const it = findKpItem(p, el);
