@@ -159,6 +159,7 @@ function ensureProject(p) {
   p.contract ||= { number: '', date: '', clientDoc: '', pay1: '', pay2: '', days: '' };
   if (!STATUS[p.status]) p.status = START_STATUS;
   p.offer.items.forEach(ensureKpItem);
+  if (p.offer.items.length && !p.offer.date) p.offer.date = localDate(new Date(p.createdAt || Date.now()));
   return p;
 }
 
@@ -1189,7 +1190,8 @@ const kpQty = it => num(it.qty) || 1;
 const kpUnitLabel = it => { const s = String(it.unitLabel || '').trim(); return s && !/^[\d\s.,]+$/.test(s) ? s : 'Вартість одного виробу'; };
 const kpTotal = it => kpQty(it) * num(it.price);
 const kpSumText = it => kpQty(it) > 1 ? `${fmtNum(kpQty(it))} шт × ${money(it.price)} = ${money(kpTotal(it))}` : money(it.price);
-const newKpItem = p => ({ id: uid(), title: p.offer.items.length ? '' : (p.furnitureType || ''), imageIds: [], list: [''], qty: 1, price: 0, unitLabel: '', days: 20, warranty: 24 });
+// Перший виріб — КП створено: дата КП фіксується (а не «сьогодні» при кожному друці).
+const newKpItem = p => (p.offer.date ||= localDate(), { id: uid(), title: p.offer.items.length ? '' : (p.furnitureType || ''), imageIds: [], list: [''], qty: 1, price: 0, unitLabel: '', days: 20, warranty: 24 });
 // Рядки матеріалів раніше були одним текстом із нумерацією вручну — тепер список, номер ставиться сам.
 function ensureKpItem(it) {
   if (!Array.isArray(it.list)) {
