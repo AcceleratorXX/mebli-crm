@@ -1199,6 +1199,12 @@ function ensureKpItem(it) {
     delete it.lines;
   }
   // Прорахунок з Excel є, а список порожній — матеріали й фурнітура з таблиці (один раз; далі список ваш)
+  // Крайку в КП не показуємо — прибрати ту, що раніше додав імпорт (один раз)
+  if (it.excel && !it.excel.noEdge) {
+    const goods = new Set(excelChoices(it).map(c => c.name.toLowerCase()));
+    it.list = it.list.filter(l => !(EDGE.test(l) && goods.has(l.trim().toLowerCase())));
+    it.excel.noEdge = true;
+  }
   if (it.excel && !it.excel.listed) {
     if (!it.list.some(l => l.trim())) it.list = excelGoods(it);
     it.excel.listed = true;
@@ -1206,8 +1212,22 @@ function ensureKpItem(it) {
   if (!it.list.length) it.list.push('');
   return it;
 }
-// Матеріали й фурнітура з прорахунку Excel (без послуг) + рядки без ціни на кшталт «Ручки 2 шт»
-const excelGoods = it => [...new Set([...(it.excel?.items || []).map(r => r.name.trim()).filter(n => n && !SERVICE.test(n)), ...(it.excel?.notes || [])])];
+// Що з прорахунку Excel можна показати в КП: матеріали й фурнітура (без послуг) + рядки без ціни на кшталт «Ручки 2 шт».
+// За замовчуванням — усе, крім крайки; решту вибирають галочками («✓ вибрати з Excel»).
+const EDGE = /крайк|кромк/i;
+function excelChoices(it) {
+  const out = [], seen = new Set();
+  const add = (name, group) => {
+    name = String(name || '').trim();
+    if (name && !seen.has(name.toLowerCase())) { seen.add(name.toLowerCase()); out.push({ name, group }); }
+  };
+  for (const r of it.excel?.items || []) {
+    if (!SERVICE.test(r.name)) add(r.name, r.kind === 'hardware' ? 'Фурнітура' : r.kind === 'material' ? 'Матеріали' : 'Матеріали й фурнітура');
+  }
+  for (const n of it.excel?.notes || []) add(n, 'Рядки без ціни');
+  return out;
+}
+const excelGoods = it => excelChoices(it).map(c => c.name).filter(n => !EDGE.test(n));
 const excelPrice = it => Math.round(num(it.excel?.cost) * (1 + num(state.settings.kpMarkup ?? 30) / 100) / kpQty(it));
 // Новий рядок після `after` (або в кінці) — і курсор у нього.
 function kpAddLine(it, after = it.list.length - 1) {
@@ -1289,6 +1309,47 @@ function parseSheet(sheet) {
 
 const xlsxGroup = it => (SERVICE.test(it.name) ? 'Послуги (порізка, кромкування…)' : it.kind === 'hardware' ? 'Фурнітура' : 'Матеріали');
 
+// Галочки «що показати в КП» з прорахунку Excel + свої рядки. Порядок уже наявних рядків зберігається.
+function pickExcelLines(p, it) {
+  const choices = excelChoices(it);
+  const low = l => l.trim().toLowerCase();
+  const inList = new Set(it.list.map(low));
+  const names = new Set(choices.map(c => c.name.toLowerCase()));
+  const own = it.list.map(l => l.trim()).filter(l => l && !names.has(l.toLowerCase()));
+  const groups = [...new Set(choices.map(c => c.group))];
+  const form = openDialog({
+    title: `Що показати в КП — ${esc(it.title || 'виріб')}`,
+    submitLabel: 'Зберегти список',
+    body: `
+      <div class="muted small">Позиції з прорахунку «${esc(it.excel.file)}». Порізка, кромкування та інші послуги сюди не потрапляють.</div>
+      ${groups.map(g => `
+        <div class="xl-group">
+          <div class="xl-group-head"><b>${esc(g)}</b><span class="muted small"><button type="button" class="link-btn" data-all="${esc(g)}">усі</button> · <button type="button" class="link-btn" data-none="${esc(g)}">жодного</button></span></div>
+          ${choices.map((c, i) => c.group !== g ? '' : `<label class="check"><input type="checkbox" name="pick" value="${i}" data-g="${esc(g)}" ${inList.has(c.name.toLowerCase()) ? 'checked' : ''}> <span>${esc(c.name)}</span></label>`).join('')}
+        </div>`).join('') || '<div class="muted">У прорахунку немає матеріалів і фурнітури.</div>'}
+      <label class="field"><span>Свої рядки — кожен з нового рядка</span><textarea name="own" rows="4" placeholder="Ручки Gola, чорні&#10;LED-підсвітка в стільниці">${esc(own.join('\n'))}</textarea></label>`,
+    onSubmit: f => {
+      const picked = [...f.querySelectorAll('[name="pick"]:checked')].map(c => choices[Number(c.value)].name);
+      const mine = f.elements.own.value.split('\n').map(l => l.trim()).filter(Boolean);
+      const want = [...picked, ...mine];
+      const keep = new Set(want.map(low));
+      const list = it.list.map(l => l.trim()).filter(l => l && keep.has(low(l)));
+      const have = new Set(list.map(low));
+      for (const n of want) if (!have.has(low(n))) { have.add(low(n)); list.push(n); }
+      it.list = list.length ? list : [''];
+      saveSoon(0);
+      if (state.current === p && state.tab === 'offer') renderTab();
+      toast(`У КП: ${posText(list.length)}`);
+    },
+  });
+  form.addEventListener('click', e => {
+    const b = e.target.closest('[data-all], [data-none]');
+    if (!b) return;
+    const g = b.dataset.all ?? b.dataset.none;
+    for (const c of form.querySelectorAll('[name="pick"]')) if (c.dataset.g === g) c.checked = 'all' in b.dataset;
+  });
+}
+
 async function importExcel(file, target) {
   const p = state.current;
   toast('Читаю таблицю…');
@@ -1316,7 +1377,7 @@ async function importExcel(file, target) {
         <select name="price"><option value="disc">Зі знижкою — скільки ви реально платите</option><option value="full">Без знижки</option></select></label>
       <label class="check"><input type="checkbox" name="setPrice" ${!target || !num(target.price) ? 'checked' : ''}>
         <span>Ціна виробу = собівартість + націнка <input class="xlsx-markup r" type="number" step="any" name="markup" value="${esc(s.kpMarkup ?? 30)}"> %</span></label>
-      <label class="check"><input type="checkbox" name="list" checked> Матеріали й фурнітуру — у список виробу (без порізки, кромкування та інших послуг)</label>
+      <label class="check"><input type="checkbox" name="list" checked> Матеріали й фурнітуру — у список виробу (без крайки й послуг; далі — галочками)</label>
       ${allNotes.length ? `<label class="check"><input type="checkbox" name="notes" checked> І рядки без ціни: ${allNotes.map(esc).join('; ')}</label>` : ''}
       <label class="check"><input type="checkbox" name="saveFile" checked> Зберегти таблицю у «Файлах» (Документи)</label>
       <div class="xlsx-sum" id="xlsx-sum"></div>`,
@@ -1338,15 +1399,14 @@ async function importExcel(file, target) {
         const rows = gs.flatMap(g => g.rows);
         const cost = rows.reduce((a, r) => a + r.qty * r.price, 0);
         it.excel = {
-          file: file.name, cost: Math.round(cost * 100) / 100, listed: true,
-          items: rows.map(({ name, code, qty, unit, price }) => ({ name, code, qty, unit, price })),
+          file: file.name, cost: Math.round(cost * 100) / 100, listed: true, noEdge: true,
+          items: rows.map(({ name, code, qty, unit, price, kind }) => ({ name, code, qty, unit, price, kind })),
           notes: f.elements.notes?.checked ? gs.flatMap(g => g.sheet.notes) : [],
         };
         if (f.elements.setPrice.checked) it.price = Math.round(cost * (1 + m / 100) / kpQty(it));
         if (f.elements.list.checked) {
           const have = new Set(it.list.map(l => l.trim().toLowerCase()));
-          const add = gs.flatMap(g => [...g.rows.filter(r => !SERVICE.test(r.name)).map(r => r.name), ...(f.elements.notes?.checked ? g.sheet.notes : [])]);
-          for (const n of add) if (!have.has(n.toLowerCase())) { have.add(n.toLowerCase()); it.list.push(n); }
+          for (const n of excelGoods(it)) if (!have.has(n.toLowerCase())) { have.add(n.toLowerCase()); it.list.push(n); }
           it.list = it.list.filter(l => l.trim());
           if (!it.list.length) it.list.push('');
         }
@@ -1356,9 +1416,11 @@ async function importExcel(file, target) {
       await saveNow();
       refreshTab();
       if (f.elements.saveFile.checked && !p.files.some(x => x.name === file.name && x.size === file.size)) {
-        try { await uploadFiles([file], 'Документи'); renderTabs(); } catch (e) { toast('Таблицю не збережено у «Файлах»: ' + e.message, true); return; }
+        try { await uploadFiles([file], 'Документи'); renderTabs(); } catch (e) { toast('Таблицю не збережено у «Файлах»: ' + e.message, true); }
       }
       toast(`Собівартість ${money(total)} — додано в КП`);
+      // Один виріб — одразу галочки «що показати в КП» (після того, як це вікно закриється)
+      if (f.elements.list.checked && batches.length === 1) setTimeout(() => pickExcelLines(p, batches[0].it));
     },
   });
 
@@ -1423,7 +1485,7 @@ function kpItemHtml(p, it, i, imgs) {
           </div>
           <div class="muted small kp-hint">
             <span><button class="link-btn" data-action="kpl-add">+ рядок</button> (або Enter) · <code>**текст**</code> — жирний, <code>[[текст]]</code> — червоний</span>
-            <span><label class="link-btn" title="Прорахунок .xlsx (напр. з ViyarPRO): матеріали й фурнітура в список, собівартість і ціна з націнкою">+ з Excel<input type="file" accept=".xlsx,.xlsm" hidden data-action="kp-xlsx"></label> ·
+            <span>${it.excel ? '<button class="link-btn" data-action="kp-xlsx-pick" title="Галочками — які матеріали й фурнітуру з прорахунку показати в КП; і свої рядки">✓ вибрати з Excel</button> · ' : ''}<label class="link-btn" title="Прорахунок .xlsx (напр. з ViyarPRO): матеріали й фурнітура в список, собівартість і ціна з націнкою">+ з Excel<input type="file" accept=".xlsx,.xlsm" hidden data-action="kp-xlsx"></label> ·
             <button class="link-btn" data-action="kp-mats" title="Матеріали й фурнітура з рахунків постачальників (без послуг)">+ з рахунків</button></span>
           </div>
         </div>
@@ -2433,6 +2495,7 @@ app.addEventListener('click', async e => {
         renderTab();
         return app.querySelector(`[data-kid="${it.id}"] [data-fid="${id}"]`)?.focus();
       }
+      case 'kp-xlsx-pick': return pickExcelLines(p, findKpItem(p, el));
       case 'kp-xlsx-price': {
         const it = findKpItem(p, el);
         it.price = excelPrice(it);

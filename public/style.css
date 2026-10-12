@@ -622,3 +622,7 @@ label.btn, label.link-btn { cursor: pointer; }
 label.btn input[hidden], label.link-btn input[hidden] { display: none; }
 .xlsx-markup { width: 70px; display: inline-block; margin: 0 4px; padding: 2px 6px; }
 .xlsx-sum:empty { display: none; }
+.xl-group { display: flex; flex-direction: column; gap: 2px; }
+.xl-group-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 6px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.xl-group .check { align-items: flex-start; }
+.xl-group .check input { margin-top: 3px; }
