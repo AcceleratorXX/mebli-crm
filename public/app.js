@@ -147,6 +147,15 @@ function ensureProject(p) {
   p.approvals ||= [];
   p.handover ||= { date: '', warrantyMonths: 24, note: '' };
   p.offer ||= { date: '', items: [] };
+  // КП зі старої версії (offer.positions) → вироби
+  if (!Array.isArray(p.offer.items)) {
+    p.offer.items = (p.offer.positions || []).map(x => ({
+      id: x.id || uid(), title: x.title || '', imageIds: x.imageIds || [], lines: x.lines || '',
+      qty: num(x.qty) || 1, price: num(x.unitPrice), unitLabel: x.priceLabel && x.priceLabel !== 'Вартість' ? x.priceLabel : '',
+      days: parseInt(x.term, 10) || 20, warranty: parseInt(x.warranty, 10) || 24,
+    }));
+    delete p.offer.positions;
+  }
   p.contract ||= { number: '', date: '', clientDoc: '', pay1: '', pay2: '', days: '' };
   if (!STATUS[p.status]) p.status = START_STATUS;
   p.offer.items.forEach(ensureKpItem);
@@ -1198,9 +1207,170 @@ function kpAddLine(it, after = it.list.length - 1) {
   app.querySelector(`[data-kid="${it.id}"] [data-li="${after + 1}"] input`)?.focus();
 }
 // Матеріали й фурнітура з рахунків постачальників — для списку в КП; послуги (порізка, крайкування…) — ні.
-const SERVICE = /порізк|підрізк|крайкуван|свердлін|присадк|фрезерн|комплектуван|доставк|упаковк|пакуван|послуг/i;
+const SERVICE = /порізк|підрізк|крайкуван|свердлін|присадк|фрезерн|фрезеру|комплектуван|доставк|упаковк|пакуван|послуг|вибірк|заглибл|кут під|паз|паз\/|обробк/i;
 const invoiceGoods = p => [...new Set(supplierInvoices(p).flatMap(i => i.items || []).map(it => it.name.trim()).filter(n => n && !SERVICE.test(n)))];
 const findKpItem = (p, el) => p.offer.items.find(x => x.id === el.closest('[data-kid]').dataset.kid);
+
+// --- Прорахунок з Excel (.xlsx, напр. замовлення з ViyarPRO): собівартість, ціна з націнкою, матеріали для КП
+
+const XLSX_COLS = {
+  name: /^(товар|найменування|назва|матеріал|номенклатура)/,
+  article: /^(код|артикул)/,
+  qty: /^(кількість|к-сть|кіл-сть)/,
+  unit: /^(одиниця|од\.?(\s|$)|од\.? ?вим)/,
+  priceDisc: /^ціна (зі|з) знижкою/,
+  price: /^ціна/,
+  sumDisc: /^сума (зі|з) знижкою/,
+  sum: /^сума/,
+};
+const cellNum = v => (typeof v === 'number' ? v : v == null || v === '' ? NaN : Number(String(v).replace(/\s/g, '').replace(',', '.')));
+const posText = n => `${n} ${plural(n, 'позиція', 'позиції', 'позицій')}`;
+const GENERIC_SHEET = /^(лист|аркуш|sheet)\s*\d*$/i;
+
+// Аркуш → позиції. Формат ViyarPRO: шапка «Код / Товар / Кількість…», під кожним блоком підсумок
+// «Матеріали та послуги:» або «Фурнітура:» — він і каже, що за позиції вище.
+function parseSheet(sheet) {
+  const items = [], notes = [];
+  let cols = null, pending = [];
+  for (const row of sheet.rows) {
+    const texts = row.map(c => (typeof c === 'string' ? c.trim().toLowerCase() : ''));
+    if (texts.some(t => XLSX_COLS.name.test(t)) && texts.some(t => XLSX_COLS.qty.test(t))) {
+      cols = {};
+      for (const k of Object.keys(XLSX_COLS)) {
+        const i = texts.findIndex((t, j) => XLSX_COLS[k].test(t) && !Object.values(cols).includes(j));
+        if (i >= 0) cols[k] = i;
+      }
+      continue;
+    }
+    if (!cols) continue;
+    const name = String(row[cols.name] ?? '').trim();
+    const first = texts.find(Boolean) || '';
+    if (!name && /:\s*$/.test(first)) {
+      const kind = /фурніт/.test(first) ? 'hardware' : /матеріал|послуг/.test(first) ? 'material' : null;
+      if (kind) { for (const it of pending) it.kind = kind; pending = []; }
+      continue;
+    }
+    const qty = cellNum(row[cols.qty]);
+    if (name && qty > 0) {
+      const per = (pk, sk) => {
+        const v = cellNum(row[cols[pk]]);
+        if (v >= 0) return v;
+        const s = cellNum(row[cols[sk]]);
+        return s >= 0 ? Math.round(s / qty * 100) / 100 : NaN;
+      };
+      const full = per('price', 'sum'), disc = per('priceDisc', 'sumDisc');
+      const it = {
+        name, qty, unit: String(row[cols.unit] ?? '').trim() || 'шт',
+        code: cols.article >= 0 && row[cols.article] != null ? String(row[cols.article]).trim() : '',
+        priceFull: full >= 0 ? full : disc >= 0 ? disc : 0,
+        priceDisc: disc >= 0 ? disc : full >= 0 ? full : 0,
+        kind: null,
+      };
+      items.push(it);
+      pending.push(it);
+      continue;
+    }
+    // Вільний текст під таблицею, напр. «Ручки 2 шт» — ціни немає, але в КП забувати не можна
+    const line = row.filter(c => c != null && String(c).trim()).map(c => String(c).trim()).join(' ');
+    if (line && !/^(разом|всього|итого)/i.test(line)) notes.push(line);
+  }
+  return { name: sheet.name, items, notes };
+}
+
+const xlsxGroup = it => (SERVICE.test(it.name) ? 'Послуги (порізка, кромкування…)' : it.kind === 'hardware' ? 'Фурнітура' : 'Матеріали');
+
+async function importExcel(file, target) {
+  const p = state.current;
+  toast('Читаю таблицю…');
+  const { sheets } = await request('POST', '/api/xlsx', file, true);
+  const parsed = sheets.map(parseSheet).filter(s => s.items.length);
+  if (!parsed.length) return toast('У таблиці не знайдено позицій: потрібна шапка з колонками «Товар» (або «Найменування») і «Кількість»', true);
+  const s = state.settings;
+  const sheetCost = (sh, disc) => sh.items.reduce((a, it) => a + it.qty * (disc ? it.priceDisc : it.priceFull), 0);
+  const allNotes = parsed.flatMap(sh => sh.notes);
+
+  const form = openDialog({
+    title: `Прорахунок з Excel — ${esc(file.name)}`,
+    submitLabel: 'Додати в КП',
+    body: `
+      <div><div class="muted small">Аркуші</div>
+        ${parsed.map((sh, i) => `<label class="check"><input type="checkbox" name="sheet" value="${i}" checked>
+          <span><b>${esc(sh.name)}</b> — ${posText(sh.items.length)}, ${money(sheetCost(sh, true))}
+          <span class="muted small">(без знижки ${money(sheetCost(sh, false))})</span></span></label>`).join('')}
+      </div>
+      <label class="field"><span>Куди</span><select name="target">
+        <option value="new">${parsed.length > 1 ? 'Нові вироби — по одному на кожен аркуш' : 'Новий виріб'}</option>
+        ${p.offer.items.map((it, i) => `<option value="${it.id}" ${it === target ? 'selected' : ''}>У виріб ${i + 1}. ${esc(it.title || 'без назви')}</option>`).join('')}
+      </select></label>
+      <label class="field"><span>Ціни з таблиці</span>
+        <select name="price"><option value="disc">Зі знижкою — скільки ви реально платите</option><option value="full">Без знижки</option></select></label>
+      <label class="check"><input type="checkbox" name="setPrice" ${!target || !num(target.price) ? 'checked' : ''}>
+        <span>Ціна виробу = собівартість + націнка <input class="xlsx-markup r" type="number" step="any" name="markup" value="${esc(s.kpMarkup ?? 30)}"> %</span></label>
+      <label class="check"><input type="checkbox" name="list" checked> Матеріали й фурнітуру — у список виробу (без порізки, кромкування та інших послуг)</label>
+      ${allNotes.length ? `<label class="check"><input type="checkbox" name="notes" checked> І рядки без ціни: ${allNotes.map(esc).join('; ')}</label>` : ''}
+      <label class="check"><input type="checkbox" name="saveFile" checked> Зберегти таблицю у «Файлах» (Документи)</label>
+      <div class="xlsx-sum" id="xlsx-sum"></div>`,
+    onSubmit: async f => {
+      const groups = collect(f);
+      if (!groups.length) { toast('Не вибрано жодного аркуша', true); return false; }
+      const m = num(f.elements.markup.value);
+      s.kpMarkup = m;
+      saveSettingsSoon();
+      const into = f.elements.target.value === 'new' ? null : p.offer.items.find(x => x.id === f.elements.target.value);
+      // В існуючий виріб — усі вибрані аркуші разом; «нові» — по виробу на аркуш.
+      const batches = into ? [{ it: into, gs: groups }] : groups.map(g => {
+        const it = ensureKpItem(newKpItem(p));
+        it.title = GENERIC_SHEET.test(g.sheet.name) ? it.title || file.name.replace(/\.\w+$/, '') : g.sheet.name;
+        p.offer.items.push(it);
+        return { it, gs: [g] };
+      });
+      for (const { it, gs } of batches) {
+        const rows = gs.flatMap(g => g.rows);
+        const cost = rows.reduce((a, r) => a + r.qty * r.price, 0);
+        it.excel = { file: file.name, cost: Math.round(cost * 100) / 100, items: rows.map(({ name, code, qty, unit, price }) => ({ name, code, qty, unit, price })) };
+        if (f.elements.setPrice.checked) it.price = Math.round(cost * (1 + m / 100) / kpQty(it));
+        if (f.elements.list.checked) {
+          const have = new Set(it.list.map(l => l.trim().toLowerCase()));
+          const add = gs.flatMap(g => [...g.rows.filter(r => !SERVICE.test(r.name)).map(r => r.name), ...(f.elements.notes?.checked ? g.sheet.notes : [])]);
+          for (const n of add) if (!have.has(n.toLowerCase())) { have.add(n.toLowerCase()); it.list.push(n); }
+          it.list = it.list.filter(l => l.trim());
+          if (!it.list.length) it.list.push('');
+        }
+      }
+      const total = groups.reduce((a, g) => a + g.rows.reduce((b, r) => b + r.qty * r.price, 0), 0);
+      addLog(p, `Прорахунок з Excel «${file.name}»: собівартість ${money(total)}`, true);
+      await saveNow();
+      refreshTab();
+      if (f.elements.saveFile.checked && !p.files.some(x => x.name === file.name && x.size === file.size)) {
+        try { await uploadFiles([file], 'Документи'); renderTabs(); } catch (e) { toast('Таблицю не збережено у «Файлах»: ' + e.message, true); return; }
+      }
+      toast(`Собівартість ${money(total)} — додано в КП`);
+    },
+  });
+
+  function collect(f) {
+    const disc = f.elements.price.value === 'disc';
+    return [...f.querySelectorAll('[name="sheet"]:checked')].map(c => {
+      const sheet = parsed[Number(c.value)];
+      return { sheet, rows: sheet.items.map(it => ({ ...it, price: disc ? it.priceDisc : it.priceFull })) };
+    });
+  }
+  const showSum = () => {
+    const rows = collect(form).flatMap(g => g.rows);
+    const by = {};
+    for (const r of rows) by[xlsxGroup(r)] = (by[xlsxGroup(r)] || 0) + r.qty * r.price;
+    const cost = Object.values(by).reduce((a, b) => a + b, 0);
+    const m = num(form.elements.markup.value);
+    form.querySelector('#xlsx-sum').innerHTML = rows.length ? `<table class="table compact"><tbody>
+      ${Object.entries(by).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="r nowrap">${money(v)}</td></tr>`).join('')}
+      <tr class="total-row"><td>Собівартість, ${posText(rows.length)}</td><td class="r nowrap">${money(cost)}</td></tr>
+      ${form.elements.setPrice.checked ? `<tr><td>Ціна з націнкою ${fmtNum(m)}%</td><td class="r nowrap"><b>${money(Math.round(cost * (1 + m / 100)))}</b></td></tr>` : ''}
+      </tbody></table>` : '';
+  };
+  form.addEventListener('input', showSum);
+  form.addEventListener('change', showSum);
+  showSum();
+}
 
 function kpItemHtml(p, it, i, imgs) {
   const n = p.offer.items.length;
@@ -1239,7 +1409,8 @@ function kpItemHtml(p, it, i, imgs) {
           </div>
           <div class="muted small kp-hint">
             <span><button class="link-btn" data-action="kpl-add">+ рядок</button> (або Enter) · <code>**текст**</code> — жирний, <code>[[текст]]</code> — червоний</span>
-            <button class="link-btn" data-action="kp-mats" title="Матеріали й фурнітура з рахунків постачальників (без послуг)">+ з рахунків</button>
+            <span><label class="link-btn" title="Прорахунок .xlsx (напр. з ViyarPRO): матеріали й фурнітура в список, собівартість і ціна з націнкою">+ з Excel<input type="file" accept=".xlsx,.xlsm" hidden data-action="kp-xlsx"></label> ·
+            <button class="link-btn" data-action="kp-mats" title="Матеріали й фурнітура з рахунків постачальників (без послуг)">+ з рахунків</button></span>
           </div>
         </div>
       </div>
@@ -1250,7 +1421,7 @@ function kpItemHtml(p, it, i, imgs) {
         ${I('warranty', 'Гарантія, місяців')}
         ${I('unitLabel', 'Текст рядка ціни за 1 шт, напр. «Вартість одного стола»', 'text')}
       </div>
-      <div class="kp-sum">Вартість: <b>${kpSumText(it)}</b></div>
+      <div class="kp-sum">${it.excel ? `<span class="muted small" title="${esc(it.excel.file)}">Собівартість за Excel: ${money(it.excel.cost)}${num(it.price) ? ` · націнка ${fmtNum(Math.round((kpTotal(it) / it.excel.cost - 1) * 100))}%` : ''}</span> · ` : ''}Вартість: <b>${kpSumText(it)}</b></div>
     </div>`;
 }
 
@@ -1263,12 +1434,13 @@ TAB_VIEWS.offer = p => {
       <label class="field inline"><span>Дата КП</span><input type="date" data-action="kp" data-k="date" value="${esc(o.date || localDate())}"></label>
       <div class="spacer"></div>
       ${o.items.length > 1 ? `<span class="muted">Разом: <b id="kp-total">${money(total)}</b></span>` : ''}
+      <label class="btn" title="Прорахунок .xlsx (напр. з ViyarPRO) — новий виріб з матеріалами, собівартістю і ціною">📥 Прорахунок з Excel<input type="file" accept=".xlsx,.xlsm" hidden data-action="kp-xlsx"></label>
       <button class="btn" data-action="kp-add">+ Виріб</button>
       <button class="btn primary" data-action="kp-print" ${o.items.length ? '' : 'disabled'}>🖨 КП (PDF)</button>
     </div>
     ${!s.logo && !s.brand ? '<div class="card muted small">Логотип, назву бренду, телефон, email, Instagram і адресу для титульної сторінки КП заповніть у <a href="#/settings">Налаштуваннях</a>.</div>' : ''}
     <datalist id="kp-mat-list">${invoiceGoods(p).map(n => `<option value="${esc(n)}">`).join('')}</datalist>
-    ${o.items.map((it, i) => kpItemHtml(p, it, i, imgs)).join('') || '<div class="empty">Комерційна пропозиція: титульна сторінка з логотипом і контактами, далі по сторінці на кожен виріб — зображення, матеріали, вартість, термін і гарантія.<br><br><button class="btn primary" data-action="kp-add">+ Додати виріб</button></div>'}`;
+    ${o.items.map((it, i) => kpItemHtml(p, it, i, imgs)).join('') || '<div class="empty">Комерційна пропозиція: титульна сторінка з логотипом і контактами, далі по сторінці на кожен виріб — зображення, матеріали, вартість, термін і гарантія.<br><br><button class="btn primary" data-action="kp-add">+ Додати виріб</button> або <label class="btn">📥 Прорахунок з Excel<input type="file" accept=".xlsx,.xlsm" hidden data-action="kp-xlsx"></label></div>'}`;
 };
 
 async function kpAddImages(p, it, files) {
@@ -1527,7 +1699,7 @@ function printContract(p) {
   }).join('');
 
   // Додаток № 3 — матеріали й фурнітура з КП; артикул — код товару з рахунків
-  const codes = new Map(supplierInvoices(p).flatMap(i => i.items || []).filter(it => it.code).map(it => [it.name.trim().toLowerCase(), it.code]));
+  const codes = new Map([...p.offer.items.flatMap(it => it.excel?.items || []), ...supplierInvoices(p).flatMap(i => i.items || [])].filter(it => it.code).map(it => [it.name.trim().toLowerCase(), it.code]));
   const mats = [...new Set(p.offer.items.flatMap(it => it.list.map(plain)).filter(Boolean))];
 
   const fileName = ['№' + t.number, fmtDate(t.date).replace(/\./g, '_'), 'Договір_меблі'].join('_').replace(/[\\/:*?"<>|]+/g, '-');
@@ -2411,6 +2583,7 @@ app.addEventListener('change', async e => {
       saveSettingsSoon();
       return viewSettings();
     }
+    if (a === 'kp-xlsx') { const f = el.files[0], it = el.closest('[data-kid]') ? findKpItem(p, el) : null; el.value = ''; if (f) await importExcel(f, it); return; }
     if (a === 'kp-upload') { const files = [...el.files]; el.value = ''; return await kpAddImages(p, findKpItem(p, el), files); }
     if (a === 'upload-cat') { state.uploadCategory = el.value; return; }
     if (a === 'inv-files') { const files = [...el.files]; el.value = ''; return await uploadInvoices(files); }

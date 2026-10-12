@@ -615,3 +615,10 @@ label.btn input[hidden] { display: none; }
 .dg-vis-title { text-align: center; font-weight: 700; font-style: italic; margin: 6px 0 10px; }
 .dg-vis img { display: block; max-width: 100%; max-height: 115mm; margin: 0 auto 8px; object-fit: contain; break-inside: avoid; }
 .dg-vis-head { break-inside: avoid; }
+
+/* ---------- прорахунок з Excel */
+
+label.btn, label.link-btn { cursor: pointer; }
+label.btn input[hidden], label.link-btn input[hidden] { display: none; }
+.xlsx-markup { width: 70px; display: inline-block; margin: 0 4px; padding: 2px 6px; }
+.xlsx-sum:empty { display: none; }

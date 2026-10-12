@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
 const { DEFAULT_TEMPLATE, FIRST_VERSION_IDS } = require('./defaults');
 const { pdfDoc, parseInvoice } = require('./pdf-text');
+const { readXlsx } = require('./xlsx');
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT) || 3000;
@@ -85,7 +86,7 @@ function send(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function readJson(req) {
+async function readBody(req) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
@@ -93,7 +94,12 @@ async function readJson(req) {
     if (size > 20 * 1024 * 1024) throw Object.assign(new Error('Завеликий запит'), { status: 413 });
     chunks.push(chunk);
   }
-  return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+  return Buffer.concat(chunks);
+}
+
+async function readJson(req) {
+  const buf = await readBody(req);
+  return buf.length ? JSON.parse(buf.toString('utf8')) : {};
 }
 
 const str = (v, max = 2000) => (v == null ? '' : String(v).slice(0, max));
@@ -130,6 +136,16 @@ async function api(req, res, parts, url) {
     db.settings = body;
     await saveDb();
     return send(res, 200, db.settings);
+  }
+
+  // Таблиця Excel → значення клітинок по аркушах (розбір позицій робить клієнт)
+  if (resource === 'xlsx' && !id && m === 'POST') {
+    try {
+      return send(res, 200, { sheets: readXlsx(await readBody(req)) });
+    } catch (err) {
+      if (err.status) throw err;
+      return send(res, 400, { error: /xlsx|аркуш|стиснення/.test(err.message) ? err.message : 'Не вдалося прочитати таблицю: ' + err.message });
+    }
   }
 
   if (resource === 'template') {
